@@ -14,15 +14,13 @@ use crate::{
 pub struct FeeModule {
     initial_cost: u64,
     fee_table: FeeTable,
-    dry_run: bool,
 }
 
 impl FeeModule {
-    pub const fn new(initial_cost: u64, fee_table: FeeTable, dry_run: bool) -> Self {
+    pub const fn new(initial_cost: u64, fee_table: FeeTable) -> Self {
         Self {
             initial_cost,
             fee_table,
-            dry_run,
         }
     }
 
@@ -65,7 +63,6 @@ impl FeeModule {
 
 impl<TStore: StateReader> RuntimeModule<TStore> for FeeModule {
     fn on_initialize(&self, track: &mut StateTracker<TStore>) -> Result<(), RuntimeModuleError> {
-        track.set_fee_state_dry_run(self.dry_run);
         track.add_fee_charge(FeeSource::Initial, self.initial_cost);
         let transaction_weight = track.get_transaction_weight();
         let transaction_weight_cost = transaction_weight
@@ -174,6 +171,12 @@ impl<TStore: StateReader> RuntimeModule<TStore> for FeeModule {
             .ok_or_else(|| RuntimeModuleError::Overflow("Overflow calculating WASM execution cost".to_string()))?;
         track.add_fee_charge(FeeSource::WasmExecution, wasm_cost);
 
+        // Exhaust burn: charged on top of the execution fee accrued so far, so leaders receive the execution fee in
+        // full and the burn amount is destroyed separately. The rate is seeded onto the fee state at execution time
+        // for the execution epoch.
+        let burn = calculate_burn_amount(track.total_fee_charges(), track.fee_burn_rate_bps())?;
+        track.add_fee_charge(FeeSource::ExhaustBurn, burn);
+
         Ok(())
     }
 
@@ -195,9 +198,29 @@ impl<TStore: StateReader> RuntimeModule<TStore> for FeeModule {
     }
 }
 
+fn calculate_burn_amount(base_fees: u64, rate_bps: u16) -> Result<u64, RuntimeModuleError> {
+    let burn = u128::from(base_fees) * u128::from(rate_bps) / 10_000;
+    u64::try_from(burn)
+        .map_err(|_| RuntimeModuleError::Overflow("Overflow calculating exhaust burn amount".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn burn_is_a_floor_divided_percentage_of_base_fees() {
+        assert_eq!(calculate_burn_amount(0, 500).unwrap(), 0);
+        assert_eq!(calculate_burn_amount(100, 0).unwrap(), 0);
+        assert_eq!(calculate_burn_amount(100, 500).unwrap(), 5);
+        assert_eq!(calculate_burn_amount(105, 500).unwrap(), 5);
+        assert_eq!(calculate_burn_amount(u64::MAX, 10_000).unwrap(), u64::MAX);
+        // A rate above 100% on a large base overflows u64 and is reported rather than silently truncated.
+        assert!(matches!(
+            calculate_burn_amount(u64::MAX, 10_001),
+            Err(RuntimeModuleError::Overflow(_))
+        ));
+    }
 
     fn fee_table() -> FeeTable {
         FeeTable {
@@ -211,7 +234,7 @@ mod tests {
     }
 
     fn publish_cost(binary_len: usize) -> u64 {
-        FeeModule::new(0, fee_table(), false)
+        FeeModule::new(0, fee_table())
             .template_publish_cost(binary_len)
             .unwrap()
     }

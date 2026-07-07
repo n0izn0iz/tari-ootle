@@ -265,6 +265,8 @@ pub async fn spawn_services(
             config.network,
             config.indexer.sidechain_id.as_ref().map(|p| p.to_byte_type()),
         ),
+        // The processor resolves the exhaust burn rate for the current epoch on each dry-run estimate.
+        consensus_constants.clone(),
     )?;
 
     let transaction_manager = TransactionManager::new(

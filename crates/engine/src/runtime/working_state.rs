@@ -18,7 +18,7 @@ use tari_engine_types::{
     bucket::Bucket,
     component::Component,
     events::Event,
-    fees::{FeeReceipt, FeeReceiptBuilder},
+    fees::{FeeReceipt, FeeSource},
     id_provider::{IdProvider, ObjectIds},
     indexed_value::{IndexedValue, IndexedWellKnownTypes},
     limits,
@@ -70,6 +70,7 @@ use crate::{
         RuntimeError,
         TransactionCommitError,
         address_allocation::AllocatedAddress,
+        fee_state,
         fee_state::FeeState,
         locking::LockedSubstate,
         scope::{CallFrame, CallScope},
@@ -122,7 +123,12 @@ impl<TStore: StateReader> WorkingState<TStore> {
         virtual_substates: VirtualSubstates,
         initial_call_scope: CallScope,
         transaction_hash: Hash32,
+        burn_rate_bps: u16,
+        dry_run: bool,
     ) -> Self {
+        let mut fee_state = FeeState::new();
+        fee_state.set_burn_rate_bps(burn_rate_bps);
+        fee_state.set_dry_run(dry_run);
         Self {
             transaction_hash,
             events: Vec::new(),
@@ -142,7 +148,7 @@ impl<TStore: StateReader> WorkingState<TStore> {
             validator_fee_withdrawals: Vec::new(),
             call_frames: Vec::new(),
             initial_call_scope,
-            fee_state: FeeState::new(),
+            fee_state,
             loaded_template_charges: HashSet::new(),
             object_ids: ObjectIds::new(limits::ENGINE_LIMITS.max_substate_outputs),
             stealth_totals: StealthTransactionTotals::default(),
@@ -1524,11 +1530,11 @@ impl<TStore: StateReader> WorkingState<TStore> {
 
             debug!(
                 target: LOG_TARGET,
-                "Collecting {} of non-refundable fees", resx.unlocked_amount()
+                "Collecting {} of non-refundable fees", paid_amount
             );
 
             // If there is no refund vault, we must take the entire amount to avoid destroying funds
-            fee_resource.deposit(resx.withdraw(resx.unlocked_amount())?)?;
+            fee_resource.deposit(resx.withdraw(paid_amount.into())?)?;
             if remaining_fees < paid_amount {
                 total_fee_overcharge += paid_amount - remaining_fees;
             }
@@ -1583,13 +1589,22 @@ impl<TStore: StateReader> WorkingState<TStore> {
             .to_u64_checked()
             .expect("FeeState guarantees that the total fee payments fit in an u64");
 
-        Ok(FeeReceiptBuilder {
-            total_fee_payment,
-            total_fees_paid,
-            total_fee_overcharge,
-            cost_breakdown: self.fee_state.take_fee_charges(),
+        // The overcharge is kept by the network as if it were a fee payment inclusive of its own burn: its burn
+        // share moves into the exhaust burn bucket so that the burn consensus carries from the pre-burn fee matches
+        // the amount actually withheld from validators.
+        let rate_bps = self.fee_state.burn_rate_bps();
+        if total_fee_overcharge > 0 && rate_bps > 0 {
+            let (validator_share, burn_share) = fee_state::split_overcharge(total_fee_overcharge, rate_bps);
+            self.fee_state.add_charge(FeeSource::ExhaustBurn, burn_share);
+            total_fee_overcharge = validator_share;
         }
-        .build())
+
+        Ok(FeeReceipt::builder()
+            .with_total_fee_payment(total_fee_payment)
+            .with_total_fees_paid(total_fees_paid)
+            .with_total_fee_overcharge(total_fee_overcharge)
+            .with_cost_breakdown(self.fee_state.take_fee_charges())
+            .build())
     }
 
     pub fn generate_substate_diff(

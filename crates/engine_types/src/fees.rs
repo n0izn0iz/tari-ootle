@@ -69,6 +69,10 @@ pub struct FeeReceipt {
 }
 
 impl FeeReceipt {
+    pub fn builder() -> FeeReceiptBuilder {
+        FeeReceiptBuilder::default()
+    }
+
     pub fn to_cost_breakdown(&self) -> FeeCostBreakdown {
         FeeCostBreakdown {
             total_fees_charged: self.total_fees_charged(),
@@ -133,6 +137,17 @@ impl FeeReceipt {
     pub fn total_fee_overcharge(&self) -> u64 {
         self.total_fee_overcharge
     }
+
+    /// The exhaust burn charged on top of the execution fee.
+    pub fn exhaust_burn_charged(&self) -> u64 {
+        self.cost_breakdown.get(FeeSource::ExhaustBurn)
+    }
+
+    /// The total amount of fees paid after refunds, excluding the exhaust burn. This is the execution cost `F` that
+    /// flows to leaders in full; the burn portion is destroyed.
+    pub fn pre_burn_fees_paid(&self) -> u64 {
+        self.total_fees_paid().saturating_sub(self.exhaust_burn_charged())
+    }
 }
 
 impl Default for FeeReceipt {
@@ -184,6 +199,9 @@ pub enum FeeSource {
     /// templates.
     #[n(8)]
     TemplatePublish = 8,
+    /// Exhaust burn, charged on top of the execution fee and destroyed rather than paid to leaders.
+    #[n(9)]
+    ExhaustBurn = 9,
 }
 
 #[derive(
@@ -224,6 +242,10 @@ impl FeeBreakdown {
 
     pub fn get_total(&self) -> u64 {
         self.breakdown.values().sum()
+    }
+
+    pub fn get(&self, source: FeeSource) -> u64 {
+        self.breakdown.get(&source).copied().unwrap_or_default()
     }
 }
 

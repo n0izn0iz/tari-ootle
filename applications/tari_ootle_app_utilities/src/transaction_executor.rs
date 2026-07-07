@@ -33,6 +33,7 @@ pub trait TransactionExecutor<TStore> {
         transaction: &Transaction,
         state_store: TStore,
         virtual_substates: VirtualSubstates,
+        burn_rate_bps: u16,
     ) -> Result<ExecutionOutput, Self::Error>;
 }
 
@@ -86,6 +87,7 @@ impl ExecutionOutput {
 pub struct TariTransactionProcessor<TStore, TTemplateProvider> {
     template_provider: Arc<TTemplateProvider>,
     modules: ModulesCollection<TStore>,
+    dry_run: bool,
     claim_burn_proof_verifier: Arc<dyn ClaimProofVerifier + Send + Sync + 'static>,
     wasm_metering_rate: WasmMeteringRate,
 }
@@ -98,10 +100,13 @@ impl<TStore: StateReader + 'static, TTemplateProvider> TariTransactionProcessor<
         claim_burn_proof_verifier: Arc<dyn ClaimProofVerifier + Send + Sync + 'static>,
     ) -> Self {
         let wasm_metering_rate = WasmMeteringRate::from_fee_table(&fee_table);
-        let modules = vec![Box::new(FeeModule::new(0, fee_table, dry_run)) as Box<dyn RuntimeModule<TStore>>];
+        // The fee module is stateless with respect to the burn rate and dry-run flag: both are seeded onto the fee
+        // state per-execution, so the module list is built once and shared.
+        let modules = vec![Box::new(FeeModule::new(0, fee_table)) as Box<dyn RuntimeModule<TStore>>];
         Self {
             template_provider: Arc::new(template_provider),
             modules: Arc::from(modules),
+            dry_run,
             claim_burn_proof_verifier,
             wasm_metering_rate,
         }
@@ -119,6 +124,7 @@ where TTemplateProvider: TemplateProvider<Template = LoadedTemplate>
         transaction: &Transaction,
         state_store: TStore,
         virtual_substates: VirtualSubstates,
+        burn_rate_bps: u16,
     ) -> Result<ExecutionOutput, Self::Error> {
         // Include signature public key badges for all transaction signers in the initial auth scope
         // NOTE: we assume all signatures have already been validated.
@@ -138,6 +144,8 @@ where TTemplateProvider: TemplateProvider<Template = LoadedTemplate>
             self.modules.clone(),
             self.claim_burn_proof_verifier.clone(),
             self.wasm_metering_rate,
+            burn_rate_bps,
+            self.dry_run,
         );
         let result = processor.execute(transaction.clone())?;
 

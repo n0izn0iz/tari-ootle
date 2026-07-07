@@ -634,6 +634,7 @@ where TConsensusSpec: ConsensusSpec
                         pool_tx
                             .set_local_decision(execution.decision())
                             .set_transaction_fee(execution.transaction_fee())
+                            .set_exhaust_burn(execution.exhaust_burn())
                             .set_evidence(execution.to_evidence(
                                 local_committee_info.num_preshards(),
                                 local_committee_info.num_committees(),
@@ -690,10 +691,8 @@ where TConsensusSpec: ConsensusSpec
                                 return Ok(Some(NoVoteReason::NoLeaderFee));
                             }
 
-                            let calculated_leader_fee = pool_tx.calculate_leader_fee(
-                                NonZeroU64::new(1).expect("1 > 0"),
-                                self.config.consensus_constants.fee_exhaust_divisor,
-                            );
+                            let calculated_leader_fee =
+                                pool_tx.calculate_leader_fee(NonZeroU64::new(1).expect("1 > 0"));
                             if calculated_leader_fee != *atom.leader_fee.as_ref().expect("None already checked") {
                                 warn!(
                                     target: LOG_TARGET,
@@ -766,6 +765,7 @@ where TConsensusSpec: ConsensusSpec
                         pool_tx
                             .set_local_decision(execution.decision())
                             .set_transaction_fee(execution.transaction_fee())
+                            .set_exhaust_burn(execution.exhaust_burn())
                             .set_evidence(execution.to_evidence(
                                 local_committee_info.num_preshards(),
                                 local_committee_info.num_committees(),
@@ -909,10 +909,7 @@ where TConsensusSpec: ConsensusSpec
                                 let involved = NonZeroU64::new(num_involved_shard_groups as u64).ok_or_else(|| {
                                     HotStuffError::InvariantError("Number of involved shard groups is 0".to_string())
                                 })?;
-                                let leader_fee = tx_rec.calculate_leader_fee(
-                                    involved,
-                                    self.config.consensus_constants.fee_exhaust_divisor,
-                                );
+                                let leader_fee = tx_rec.calculate_leader_fee(involved);
                                 tx_rec.set_leader_fee(leader_fee);
                             }
                         }
@@ -1168,6 +1165,7 @@ where TConsensusSpec: ConsensusSpec
                     tx_rec
                         .set_local_decision(execution.decision())
                         .set_transaction_fee(0)
+                        .set_exhaust_burn(0)
                         .no_leader_fee()
                         .set_next_stage_and_readiness(TransactionPoolStage::LocalAccepted, block.shard_group())?;
 
@@ -1219,8 +1217,7 @@ where TConsensusSpec: ConsensusSpec
             let num_involved_shard_groups = tx_rec.evidence().num_shard_groups();
             let involved = NonZeroU64::new(num_involved_shard_groups as u64)
                 .ok_or_else(|| HotStuffError::InvariantError("Number of involved shard groups is 0".to_string()))?;
-            let calculated_leader_fee =
-                tx_rec.calculate_leader_fee(involved, self.config.consensus_constants.fee_exhaust_divisor);
+            let calculated_leader_fee = tx_rec.calculate_leader_fee(involved);
             if calculated_leader_fee != *leader_fee {
                 warn!(
                     target: LOG_TARGET,

@@ -317,7 +317,8 @@ pub async fn spawn_services(
             global_db.clone(),
         )),
     );
-    let transaction_executor = TariBlockTransactionExecutor::new(transaction_processor);
+    // The executor resolves the exhaust burn rate for each transaction's execution epoch.
+    let transaction_executor = TariBlockTransactionExecutor::new(transaction_processor, consensus_constants.clone());
     let transaction_validator = TariBlockTransactionValidator::new(
         create_mempool_transaction_validator(config.network, template_provider.clone()).boxed(),
         EpochRangeValidator::new().boxed(),
