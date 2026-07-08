@@ -197,6 +197,9 @@ pub async fn spawn_services(
     let transaction_event_notifier = Notify::new(1024);
     let validator_status = ValidatorStatusMonitor::new(epoch_manager.clone());
 
+    #[cfg(feature = "metrics")]
+    let network_state_metrics = network_state_sync::NetworkStateMetrics::register(metrics_registry);
+
     network_state_sync::NetworkWideStateSync::new(
         epoch_manager.clone(),
         networking.clone(),
@@ -209,6 +212,10 @@ pub async fn spawn_services(
         event_notifier.clone(),
         transaction_event_notifier.clone(),
         validator_status.clone(),
+        #[cfg(feature = "metrics")]
+        network_state_metrics,
+        #[cfg(feature = "metrics")]
+        consensus_constants.clone(),
     )
     .spawn(shutdown.clone());
 
@@ -464,12 +471,12 @@ async fn hack_xtr_initial_supply<TStore: IndexerStore>(store: &TStore) -> anyhow
     store
         .with_write_tx(|tx| {
             // Check if the initial supply is already set
-            let existing_supply: Option<Amount> = tx.key_value_get_value(Key::XtrAccumulatedClaimed).optional()?;
+            let existing_supply: Option<Amount> = tx.key_value_get_value(Key::TariAccumulatedClaimed).optional()?;
             if existing_supply.is_some() {
                 return Ok(());
             }
 
-            tx.key_value_set(Key::XtrAccumulatedClaimed, TXTR_FAUCET_INITIAL_SUPPLY)
+            tx.key_value_set(Key::TariAccumulatedClaimed, TXTR_FAUCET_INITIAL_SUPPLY)
                 .map_err(|e| anyhow!("Failed to set XTR initial supply in the store: {}", e))
         })
         .await

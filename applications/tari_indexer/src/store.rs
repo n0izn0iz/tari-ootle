@@ -156,6 +156,8 @@ pub trait IndexerStoreReadTransaction {
         address: &TransactionReceiptAddress,
     ) -> Result<TransactionReceipt, StorageError>;
 
+    fn count_transaction_receipts(&mut self) -> Result<u64, StorageError>;
+
     // -------------------------------- KeyValues -------------------------------- //
     fn key_value_get_value<K: AsRef<str>, T: DeserializeOwned>(&mut self, key: K) -> Result<T, StorageError>;
     fn key_value_get_raw<K: AsRef<str>>(&mut self, key: K) -> Result<KeyValue<String>, StorageError>;
@@ -300,6 +302,21 @@ pub struct ReadOnlyStore<T: IndexerStoreReader> {
     inner: T,
 }
 
+/// Network-wide XTR economic totals accumulated during state sync.
+pub struct XtrEconomics {
+    /// Total XTR claimed (peg-in), accumulated from claimed-output tombstones.
+    pub total_claimed: Amount,
+    /// Total exhaust burned, sourced from checkpoint headers. Authoritative and complete since genesis.
+    pub total_exhaust_burned: Amount,
+    /// Total pre-burn execution fees `F`, summed from transaction receipts.
+    pub fee_volume: Amount,
+    /// Total exhaust burned, summed from the same transaction receipts as `fee_volume` (so their ratio is
+    /// the exact realized rate).
+    pub receipt_exhaust_burned: Amount,
+    /// Number of transaction receipts the indexer has stored.
+    pub transaction_receipt_count: u64,
+}
+
 impl<T: IndexerStoreReader + Clone> Clone for ReadOnlyStore<T> {
     fn clone(&self) -> Self {
         Self {
@@ -334,15 +351,18 @@ impl<T: IndexerStoreReader> ReadOnlyStore<T> {
             .await
     }
 
-    pub async fn get_xtr_total_supply(&self) -> Result<Amount, StorageError> {
+    pub async fn get_tari_total_supply(&self) -> Result<Amount, StorageError> {
         self.inner
             .with_read_tx(|tx| {
                 let claimed = tx
-                    .key_value_get_value::<_, Amount>(Key::XtrAccumulatedClaimed)
+                    .key_value_get_value::<_, Amount>(Key::TariAccumulatedClaimed)
                     .optional()?
                     .unwrap_or_default();
+                // Both `claimed` and the receipt-sourced burn advance on the state-sync frontier, so the
+                // difference is internally consistent; the header-sourced total tracks a separate
+                // (checkpoint) frontier and is kept only as a cross-check.
                 let burnt = tx
-                    .key_value_get_value::<_, Amount>(Key::XtrAccumulatedExhaustBurn)
+                    .key_value_get_value::<_, Amount>(Key::TariAccumulatedReceiptExhaustBurn)
                     .optional()?
                     .unwrap_or_default();
 
@@ -354,6 +374,38 @@ impl<T: IndexerStoreReader> ReadOnlyStore<T> {
                             claimed, burnt
                         ),
                     })
+            })
+            .await
+    }
+
+    pub async fn get_tari_economics(&self) -> Result<XtrEconomics, StorageError> {
+        self.inner
+            .with_read_tx(|tx| {
+                let total_claimed = tx
+                    .key_value_get_value::<_, Amount>(Key::TariAccumulatedClaimed)
+                    .optional()?
+                    .unwrap_or_default();
+                let total_exhaust_burned = tx
+                    .key_value_get_value::<_, Amount>(Key::TariAccumulatedExhaustBurn)
+                    .optional()?
+                    .unwrap_or_default();
+                let fee_volume = tx
+                    .key_value_get_value::<_, Amount>(Key::TariAccumulatedFees)
+                    .optional()?
+                    .unwrap_or_default();
+                let receipt_exhaust_burned = tx
+                    .key_value_get_value::<_, Amount>(Key::TariAccumulatedReceiptExhaustBurn)
+                    .optional()?
+                    .unwrap_or_default();
+                let transaction_receipt_count = tx.count_transaction_receipts()?;
+
+                Ok(XtrEconomics {
+                    total_claimed,
+                    total_exhaust_burned,
+                    fee_volume,
+                    receipt_exhaust_burned,
+                    transaction_receipt_count,
+                })
             })
             .await
     }
