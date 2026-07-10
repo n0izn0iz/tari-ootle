@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.35.1"
+version = "0.35.2"
 edition = "2024"
 authors = ["The Tari Development Community"]
 repository = "https://github.com/tari-project/tari-ootle"
@@ -103,7 +103,7 @@ tari_engine = { path = "crates/engine", version = "0.35" }
 tari_ootle_p2p = { path = "crates/p2p" }
 tari_ootle_storage = { path = "crates/storage" }
 tari_ootle_storage_sqlite = { path = "crates/storage_sqlite" }
-tari_ootle_wallet_crypto = { path = "crates/wallet/crypto", version = "0.35.1" }
+tari_ootle_wallet_crypto = { path = "crates/wallet/crypto", version = "0.36.0" }
 tari_ootle_wallet_sdk = { path = "crates/wallet/sdk", version = "0.34" }
 tari_ootle_wallet_sdk_services = { path = "crates/wallet/sdk_services" }
 tari_ootle_wallet_storage_sqlite = { path = "crates/wallet/storage_sqlite", version = "0.34" }
@@ -158,18 +158,18 @@ minotari_node_grpc_client = { git = "https://github.com/tari-project/tari.git", 
 minotari_wallet_grpc_client = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
 tari_common = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
 tari_common_sqlite = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
-tari_common_types = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
+tari_common_types = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d", version = "5.4.0-rc.0" }
 tari_jellyfish = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
 tari_metrics = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
 tari_mmr = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
 tari_node_components = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
 tari_shutdown = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
-tari_sidechain = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
+tari_sidechain = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d", version = "5.4.0-rc.0" }
 tari_transaction_components = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
 
 tari_crypto = "0.23"
 tari_utilities = "0.10"
-tari_hashing = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
+tari_hashing = "5.4.0-rc.0"
 
 ## Ledger
 minotari_ledger_wallet_common = { git = "https://github.com/tari-project/tari.git", rev = "dd1cf1d018a3876e949bf9c3b423ac3bdffd694d" }
