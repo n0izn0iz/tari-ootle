@@ -6,10 +6,10 @@ use std::time::Duration;
 use axum_extra::headers::authorization::Bearer;
 use axum_jrpc::error::{JsonRpcError, JsonRpcErrorReason};
 use log::*;
-use ootle_byte_type::ToByteType;
+use ootle_byte_type::{FromByteType, ToByteType};
 use serde_json::json;
 use tari_crypto::{commitment::HomomorphicCommitmentFactory, keys::PublicKey as _, ristretto::RistrettoPublicKey};
-use tari_engine_types::crypto::get_commitment_factory;
+use tari_engine_types::{crypto::get_commitment_factory, substate::SubstateId};
 use tari_ootle_common_types::{displayable::Displayable, optional::Optional};
 use tari_ootle_wallet_crypto::OutputWitness;
 use tari_ootle_wallet_sdk::models::{ConfidentialOutputModel, KeyBranch, OutputStatus};
@@ -18,6 +18,9 @@ use tari_ootle_walletd_client::{
     types::{
         ConfidentialCreateOutputProofRequest,
         ConfidentialCreateOutputProofResponse,
+        ConfidentialOutputInfo,
+        ConfidentialOutputsListRequest,
+        ConfidentialOutputsListResponse,
         ConfidentialViewVaultBalanceRequest,
         ConfidentialViewVaultBalanceResponse,
         ProofsCancelRequest,
@@ -28,7 +31,7 @@ use tari_ootle_walletd_client::{
         ProofsGenerateResponse,
     },
 };
-use tari_template_lib_types::Amount;
+use tari_template_lib_types::{Amount, ConfidentialOutputAddress};
 use tokio::{task::block_in_place, time::Instant};
 
 use crate::handlers::{
@@ -60,7 +63,7 @@ pub async fn handle_create_transfer_proof(
         Crud::Create,
         Some(*account.component_address()),
     )])?;
-    let account_owner_key_id = account
+    account
         .owner_key_id()
         .ok_or_else(|| invalid_request("Account does not have an owner key"))?;
     let vault = sdk
@@ -90,9 +93,8 @@ pub async fn handle_create_transfer_proof(
     // TODO: Any errors from here need to unlock the outputs, ideally just roll back (refactor required but doable).
 
     // TODO: Wrap up key/encrypted data handling in the wallet SDK
-    let account_key = sdk.key_manager_api().get_key(account_owner_key_id)?;
     let output_mask = sdk.key_manager_api().next_key(KeyBranch::ConfidentialMask)?;
-    let (_, public_nonce) = RistrettoPublicKey::random_keypair(&mut rand::rng());
+    let (nonce_secret, public_nonce) = RistrettoPublicKey::random_keypair(&mut rand::rng());
 
     let confidential_amount = req.confidential_amount.to_u64_checked().ok_or_else(|| {
         invalid_request(format!(
@@ -101,12 +103,19 @@ pub async fn handle_create_transfer_proof(
         ))
     })?;
 
+    // Outputs must be encrypted to the recipient's view key: that is the key a receiving wallet scans with,
+    // and any other key leaves it unable to recover the value and mask.
+    let destination_view_key: RistrettoPublicKey = req
+        .destination_address
+        .view_only_key()
+        .try_from_byte_type()
+        .map_err(|e| invalid_params("destination_address", Some(format!("Invalid view key: {e}"))))?;
     let encrypted_data = sdk.confidential_crypto_api().encrypt_value_and_mask(
         confidential_amount,
         &output_mask.key,
-        &public_nonce,
-        &account_key.secret,
-        req.memo.as_ref(),
+        &destination_view_key,
+        &nonce_secret,
+        req.output_memo.as_ref(),
     )?;
 
     let resource = sdk.substate_api().fetch_resource(req.resource_address).await?;
@@ -142,13 +151,16 @@ pub async fn handle_create_transfer_proof(
 
     let maybe_change_statement = if change_amount_u64 > 0 {
         let change_mask = sdk.key_manager_api().next_key(KeyBranch::ConfidentialMask)?;
-        let (_, public_nonce) = RistrettoPublicKey::random_keypair(&mut rand::rng());
+        let (nonce_secret, public_nonce) = RistrettoPublicKey::random_keypair(&mut rand::rng());
 
+        // Change returns to this account, so it is encrypted to this account's own view key, which is the
+        // key the output is recorded against below.
+        let account_view_key = sdk.key_manager_api().get_key(account.view_only_key_id())?;
         let encrypted_data = sdk.confidential_crypto_api().encrypt_value_and_mask(
             change_amount_u64,
             &change_mask.key,
-            &public_nonce,
-            &change_mask.key,
+            &account_view_key.to_public_key(),
+            &nonce_secret,
             None,
         )?;
 
@@ -299,6 +311,33 @@ pub async fn handle_create_output_proof(
     Ok(ConfidentialCreateOutputProofResponse { proof })
 }
 
+pub async fn handle_list_outputs(
+    context: &HandlerContext,
+    token: Option<&Bearer>,
+    req: ConfidentialOutputsListRequest,
+) -> Result<ConfidentialOutputsListResponse, anyhow::Error> {
+    context.authorize(token, &[Permission::Confidential(Crud::Read, req.account_address)])?;
+
+    let outputs = context.wallet_sdk().confidential_outputs_api().outputs_get_many(
+        &req.resource_address,
+        req.account_address.as_ref(),
+        req.filter_by_status,
+    )?;
+
+    Ok(ConfidentialOutputsListResponse {
+        outputs: outputs
+            .into_iter()
+            .map(|o| ConfidentialOutputInfo {
+                address: ConfidentialOutputAddress::new(req.resource_address, o.commitment),
+                vault_id: o.vault_id,
+                value: o.value,
+                status: o.status,
+                memo: o.memo,
+            })
+            .collect(),
+    })
+}
+
 pub async fn handle_view_vault_balance(
     context: &HandlerContext,
     token: Option<&Bearer>,
@@ -319,14 +358,42 @@ pub async fn handle_view_vault_balance(
     let commitments = vault
         .get_confidential_commitments()
         .ok_or_else(|| invalid_params("vault_id", Some("Vault does not contain a confidential resource")))?;
+    let resource_address = *vault.resource_address();
 
     // Get view secret key
     let view_key = sdk.key_manager_api().get_elgamal_encrypted_view_key(req.view_key_id)?;
 
-    let elgamal_proofs = commitments
-        .values()
-        .filter_map(|o| o.viewable_balance.clone())
+    // Confidential OutputBodies live in separate ConfidentialOutput substates, so they are fetched in one batch
+    // by their commitment-derived addresses to obtain the viewable-balance proofs.
+    let addresses = commitments
+        .iter()
+        .map(|commitment| SubstateId::ConfidentialOutput(ConfidentialOutputAddress::new(resource_address, *commitment)))
         .collect::<Vec<_>>();
+    let mut substates = sdk.substate_api().get_substates_from_network(addresses).await?;
+
+    let mut viewable = Vec::new();
+    for commitment in commitments {
+        let id = SubstateId::ConfidentialOutput(ConfidentialOutputAddress::new(resource_address, *commitment));
+        // An output can be spent between the vault fetch and this fetch; it then no longer exists and no
+        // longer contributes to the balance, so it is skipped rather than failing the whole view.
+        let Some(substate) = substates.remove(&id) else {
+            warn!(
+                target: LOG_TARGET,
+                "Confidential output {} was not returned by the indexer. Skipping.",
+                id
+            );
+            continue;
+        };
+        let output = substate
+            .into_substate_value()
+            .into_confidential_output()
+            .ok_or_else(|| anyhow::anyhow!("Indexer returned a non-confidential-output substate for {}", id))?;
+        if let Some(proof) = output.into_output().viewable_balance {
+            viewable.push((*commitment, proof));
+        }
+    }
+
+    let elgamal_proofs = viewable.iter().map(|(_, proof)| proof.clone()).collect::<Vec<_>>();
 
     let timer = Instant::now();
     let balances = block_in_place(|| {
@@ -343,9 +410,9 @@ pub async fn handle_view_vault_balance(
     info!(target: LOG_TARGET, "Brute force balance lookup took {:.2?}", timer.elapsed());
 
     Ok(ConfidentialViewVaultBalanceResponse {
-        balances: commitments
+        balances: viewable
             .iter()
-            .filter_map(|(id, o)| o.viewable_balance.as_ref().map(|_| *id))
+            .map(|(commitment, _)| *commitment)
             .zip(balances)
             .collect(),
     })

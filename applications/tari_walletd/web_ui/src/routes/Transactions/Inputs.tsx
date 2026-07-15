@@ -35,6 +35,7 @@ function getSubstateType(substateId: string): string {
   if (substateId.startsWith("template_")) return "Template";
   if (substateId.startsWith("utxo_")) return "Utxo";
   if (substateId.startsWith("vnfp_")) return "VnFeePool";
+  if (substateId.startsWith("coutput_")) return "Confidential Output";
   return "Unknown";
 }
 
@@ -49,6 +50,8 @@ function getTypeColor(type: string): "primary" | "secondary" | "success" | "warn
     case "NFT":
       return "info";
     case "Commitment":
+      return "warning";
+    case "Confidential Output":
       return "warning";
     case "Transaction Receipt":
       return "error";

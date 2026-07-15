@@ -31,6 +31,7 @@ use tari_template_builtin::ACCOUNT_TEMPLATE_ADDRESS;
 use tari_template_lib_types::{
     Amount,
     ComponentAddress,
+    ConfidentialOutputAddress,
     NonFungibleAddress,
     NonFungibleId,
     ResourceAddress,
@@ -254,13 +255,69 @@ where TSpec: WalletSdkSpec
                 account_address,
                 commitments.len()
             );
+            // Confidential OutputBodies live in separate ConfidentialOutput substates. Only commitments the
+            // wallet does not already have a record for are fetched (verify_and_update_confidential_outputs
+            // skips known ones anyway), in one batched network request. A commitment the indexer does not
+            // return (e.g. spent since the vault was fetched) is skipped rather than failing the refresh.
             let account = self
                 .wallet_sdk
                 .accounts_api()
                 .get_account_by_address(&account_address)?;
+            let resource_address = *latest_vault.resource_address();
+
+            let known_commitments = self
+                .wallet_sdk
+                .confidential_outputs_api()
+                .outputs_get_many(&resource_address, Some(&account_address), None)?
+                .into_iter()
+                .filter(|o| o.vault_id == vault_id)
+                .map(|o| o.commitment)
+                .collect::<HashSet<_>>();
+
+            let ids_to_fetch = commitments
+                .iter()
+                .filter(|commitment| !known_commitments.contains(*commitment))
+                .map(|commitment| {
+                    SubstateId::ConfidentialOutput(ConfidentialOutputAddress::new(resource_address, *commitment))
+                })
+                .collect::<Vec<_>>();
+            let mut substates = self
+                .wallet_sdk
+                .substate_api()
+                .get_substates_from_network(ids_to_fetch)
+                .await?;
+
+            let mut outputs = Vec::with_capacity(substates.len());
+            for commitment in commitments {
+                let id = SubstateId::ConfidentialOutput(ConfidentialOutputAddress::new(resource_address, *commitment));
+                let Some(substate) = substates.remove(&id) else {
+                    if !known_commitments.contains(commitment) {
+                        warn!(
+                            target: LOG_TARGET,
+                            "Confidential output {} was not returned by the indexer. Skipping.",
+                            id
+                        );
+                    }
+                    continue;
+                };
+                let output = substate
+                    .into_substate_value()
+                    .into_confidential_output()
+                    .ok_or_else(|| {
+                        AccountMonitorError::UnexpectedSubstate(format!(
+                            "Expected {} to be a confidential output",
+                            commitment
+                        ))
+                    })?;
+                outputs.push((*commitment, output.into_output()));
+            }
             self.wallet_sdk
                 .confidential_outputs_api()
-                .verify_and_update_confidential_outputs(account.account(), vault_id, commitments)?;
+                .verify_and_update_confidential_outputs(
+                    account.account(),
+                    vault_id,
+                    outputs.iter().map(|(c, o)| (c, o)),
+                )?;
             has_changed = true;
         }
 

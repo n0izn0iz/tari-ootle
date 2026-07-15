@@ -91,6 +91,7 @@ use tari_template_lib::{
         ResourceGetNonFungibleArg,
         ResourceRef,
         ResourceUpdateNonFungibleDataArg,
+        SetFreezeConfidentialOutputsArg,
         SetFreezeStealthUtxosArg,
         SpendContextAction,
         StealthTransferResourceArg,
@@ -111,6 +112,7 @@ use tari_template_lib::{
         AuthHookCaller,
         ClaimedOutputTombstoneAddress,
         ComponentAddress,
+        ConfidentialOutputAddress,
         EntityId,
         Hash32,
         LogLevel,
@@ -1939,6 +1941,73 @@ where
                     Ok(InvokeResult::unit())
                 })
             },
+            ResourceAction::SetConfidentialOutputsFreeze => {
+                let resource_address =
+                    resource_ref
+                        .as_resource_address()
+                        .ok_or_else(|| RuntimeError::InvalidArgument {
+                            argument: "resource_ref",
+                            reason: "SetConfidentialOutputsFreeze resource action requires a resource address"
+                                .to_string(),
+                        })?;
+                let arg: SetFreezeConfidentialOutputsArg = args.assert_one_arg()?;
+
+                if arg.commitments.is_empty() {
+                    return Err(RuntimeError::InvalidArgument {
+                        argument: "SetFreezeConfidentialOutputsArg",
+                        reason: "Commitments list cannot be empty".to_string(),
+                    });
+                }
+
+                self.tracker.write_with(|state_mut| {
+                    let resource_lock = state_mut.read_lock_substate(SubstateId::Resource(resource_address))?;
+
+                    let resource = state_mut.get_resource(&resource_lock)?;
+
+                    if !resource.resource_type().is_confidential() {
+                        return Err(RuntimeError::InvalidArgument {
+                            argument: "resource_ref",
+                            reason: "SetConfidentialOutputsFreeze can only be called on confidential resources"
+                                .to_string(),
+                        });
+                    }
+
+                    state_mut.authorization().check_resource_access_rules(
+                        ResourceAuthAction::Freeze,
+                        resource.as_ownership(),
+                        resource.access_rules(),
+                    )?;
+
+                    for commitment in arg.commitments {
+                        let id = SubstateId::ConfidentialOutput(ConfidentialOutputAddress::new(
+                            resource_address,
+                            commitment,
+                        ));
+                        let locked = state_mut.write_lock_substate(id.clone())?;
+
+                        let output_mut = state_mut
+                            .get_locked_substate_mut(&locked)?
+                            .as_confidential_output_mut()
+                            .ok_or_else(|| RuntimeError::LockSubstateMismatch {
+                                lock_id: locked.lock_id(),
+                                expected_type: "ConfidentialOutput",
+                                id,
+                            })?;
+
+                        // Freeze is idempotent.
+                        if arg.freeze {
+                            output_mut.freeze();
+                        } else {
+                            output_mut.unfreeze();
+                        }
+                        state_mut.unlock_substate(locked)?;
+                    }
+
+                    state_mut.unlock_substate(resource_lock)?;
+
+                    Ok(InvokeResult::unit())
+                })
+            },
             ResourceAction::StealthUtxoBurn => {
                 let resource_address =
                     resource_ref
@@ -2141,7 +2210,7 @@ where
                 self.tracker.write_with(move |state_mut| {
                     let bucket = state_mut.take_bucket(bucket_id)?;
                     // It is invalid to deposit a bucket that has locked funds
-                    if !bucket.locked_amount().is_zero() {
+                    if bucket.has_locked_funds() {
                         return Err(RuntimeError::InvalidOpDepositLockedBucket {
                             bucket_id,
                             locked_amount: bucket.locked_amount(),
@@ -2219,23 +2288,35 @@ where
                                 ),
                             })?;
 
+                    // Enforce confidential limits before the withdraw's proof crypto runs.
+                    if let VaultWithdrawArg::Confidential { proof } = &arg {
+                        state.account_confidential_withdraw(proof)?;
+                    }
+
                     let vault_mut = state.get_vault_mut(&vault_lock)?;
-                    let (resource_container, public_amount) = match arg {
+                    let (resource_container, public_amount, confidential_effects) = match arg {
                         VaultWithdrawArg::Fungible { amount } | VaultWithdrawArg::Stealth { amount } => {
                             let container = vault_mut.withdraw(amount)?;
-                            (container, amount)
+                            (container, amount, None)
                         },
                         VaultWithdrawArg::NonFungible { ids } => {
                             let container = vault_mut.withdraw_non_fungibles(&ids)?;
                             let amount = ids.len() as u128;
-                            (container, amount.into())
+                            (container, amount.into(), None)
                         },
                         VaultWithdrawArg::Confidential { proof } => {
                             let amount = proof.revealed_input_amount();
-                            let container = vault_mut.withdraw_confidential(*proof, maybe_view_key.as_ref())?;
-                            (container, amount)
+                            let (container, effects) =
+                                vault_mut.withdraw_confidential(*proof, maybe_view_key.as_ref())?;
+                            (container, amount, Some(effects))
                         },
                     };
+
+                    // Down the spent input substates and materialise the new change/output commitments.
+                    if let Some(effects) = confidential_effects {
+                        let resource_address = *resource_container.resource_address();
+                        state.materialize_confidential_outputs(resource_address, effects)?;
+                    }
 
                     // Emit a builtin event for the withdraw
                     let payload = Metadata::from_iter([
@@ -2699,8 +2780,11 @@ where
                                 e
                             ),
                         })?;
+                    state.account_confidential_withdraw(&proof)?;
                     let bucket_mut = state.get_bucket_mut(bucket_id)?;
-                    let resource = bucket_mut.take_confidential(proof, view_key.as_ref())?;
+                    let (resource, effects) = bucket_mut.take_confidential(proof, view_key.as_ref())?;
+                    let resource_address = *resource.resource_address();
+                    state.materialize_confidential_outputs(resource_address, effects)?;
                     let bucket_id = state.id_provider()?.new_bucket_id();
                     state.new_bucket(bucket_id, resource)?;
                     state.unlock_substate(resource_lock)?;
@@ -2751,8 +2835,9 @@ where
 
                 self.tracker.write_with(|state| {
                     let bucket = state.take_bucket(bucket_id)?;
-                    // It is invalid to burn a bucket that has locked funds (e.g. via a proof)
-                    if !bucket.locked_amount().is_zero() {
+                    // It is invalid to burn a bucket that has locked funds (e.g. via a proof). Burning downs only
+                    // the unlocked commitments, so a locked one would be left live with nothing referencing it.
+                    if bucket.has_locked_funds() {
                         return Err(RuntimeError::InvalidOpDepositLockedBucket {
                             bucket_id,
                             locked_amount: bucket.locked_amount(),

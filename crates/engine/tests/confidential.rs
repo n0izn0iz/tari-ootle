@@ -1,14 +1,15 @@
 //   Copyright 2023 The Tari Project
 //   SPDX-License-Identifier: BSD-3-Clause
 
-use std::collections::BTreeMap;
-
+use ootle_byte_type::ToByteType;
 use tari_crypto::{
     keys::PublicKey as _,
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
 };
+use tari_engine::runtime::{ArgumentValidationError, RuntimeError};
 use tari_engine_types::{
-    crypto::{ElgamalVerifiableBalance, OutputBody, ValueLookup},
+    crypto::{ElgamalVerifiableBalance, OutputBody, ValueLookup, commit_amount},
+    limits::CONFIDENTIAL_LIMITS,
     resource_container::ResourceError,
     substate::SubstateId,
 };
@@ -19,8 +20,9 @@ use tari_template_lib::{
     types::{
         Amount,
         ComponentAddress,
-        confidential::ConfidentialOutputStatement,
-        crypto::{PedersenCommitmentBytes, RistrettoPublicKeyBytes},
+        ConfidentialOutputAddress,
+        confidential::{ConfidentialOutputStatement, ConfidentialWithdrawProof},
+        crypto::RistrettoPublicKeyBytes,
     },
 };
 use tari_template_test_tooling::{
@@ -141,8 +143,10 @@ fn transfer_confidential_amounts_between_accounts() {
     // Faucet is not changed, only the faucet vault.
     assert_eq!(diff.up_iter().filter(|(addr, _)| *addr == faucet).count(), 0);
     assert_eq!(diff.down_iter().filter(|(addr, _)| *addr == faucet).count(), 0);
-    assert_eq!(diff.up_iter().count(), 4);
-    assert_eq!(diff.down_iter().count(), 2);
+    // Up: faucet vault, account1 vault, account1 component, transaction receipt, plus the change and output
+    // ConfidentialOutput substates. Down: the two mutated substates plus the spent input ConfidentialOutput.
+    assert_eq!(diff.up_iter().count(), 6);
+    assert_eq!(diff.down_iter().count(), 3);
 
     let withdraw_proof = generate_withdraw_proof(&proof.output_mask, 100, Some(900), 0u64);
     let split_proof = generate_withdraw_proof(&withdraw_proof.output_mask, 20, Some(80), 0u64);
@@ -182,8 +186,12 @@ fn transfer_confidential_amounts_between_accounts() {
     assert_eq!(diff.down_iter().filter(|(addr, _)| *addr == account1).count(), 0);
     assert_eq!(diff.up_iter().filter(|(addr, _)| *addr == account2).count(), 1);
     assert_eq!(diff.down_iter().filter(|(addr, _)| *addr == account2).count(), 1);
-    assert_eq!(diff.up_iter().count(), 4);
-    assert_eq!(diff.down_iter().count(), 2);
+    // Up: account1 vault, account2 vault, account2 component, transaction receipt, plus three materialised
+    // ConfidentialOutput substates (withdraw change, split change and split output). The intermediate coins1 output is
+    // created and immediately spent by the in-transaction split, so it collapses and never appears in the diff. Down:
+    // account1 vault, account2 component and the single spent input ConfidentialOutput.
+    assert_eq!(diff.up_iter().count(), 7);
+    assert_eq!(diff.down_iter().count(), 3);
 }
 
 #[test]
@@ -470,16 +478,16 @@ fn mint_revealed_with_invalid_proof() {
 }
 
 pub fn try_brute_force_confidential_balance<L>(
-    utxos: &BTreeMap<PedersenCommitmentBytes, OutputBody>,
+    outputs: &[OutputBody],
     secret_view_key: &RistrettoSecretKey,
     value_lookup: &L,
 ) -> Result<Option<u64>, L::Error>
 where
     L: ValueLookup,
 {
-    let decompressed_viewable_balances = utxos
-        .values()
-        .filter_map(|utxo| utxo.viewable_balance.as_ref().map(|vb| vb.try_into().unwrap()))
+    let decompressed_viewable_balances = outputs
+        .iter()
+        .filter_map(|output| output.viewable_balance.as_ref().map(|vb| vb.try_into().unwrap()))
         .collect::<Vec<_>>();
 
     let balances =
@@ -518,12 +526,13 @@ fn mint_with_view_key() {
         .next()
         .unwrap();
 
-    let total_balance = try_brute_force_confidential_balance(
-        faucet_vault.get_confidential_commitments().unwrap(),
-        &view_key_secret,
-        &GenerateValueLookup::new(0..=200),
-    )
-    .unwrap();
+    let faucet_outputs = test
+        .read_only_state_store()
+        .get_confidential_output_bodies(&faucet_vault)
+        .unwrap();
+    let total_balance =
+        try_brute_force_confidential_balance(&faucet_outputs, &view_key_secret, &GenerateValueLookup::new(0..=200))
+            .unwrap();
     assert_eq!(total_balance, Some(223 - 55));
 
     let (_, user_vault) = test
@@ -534,11 +543,170 @@ fn mint_with_view_key() {
         .next()
         .unwrap();
 
-    let total_balance = try_brute_force_confidential_balance(
-        user_vault.get_confidential_commitments().unwrap(),
-        &view_key_secret,
-        &GenerateValueLookup::new(0..=200),
-    )
-    .unwrap();
+    let user_outputs = test
+        .read_only_state_store()
+        .get_confidential_output_bodies(&user_vault)
+        .unwrap();
+    let total_balance =
+        try_brute_force_confidential_balance(&user_outputs, &view_key_secret, &GenerateValueLookup::new(0..=200))
+            .unwrap();
     assert_eq!(total_balance, Some(55));
+}
+
+#[test]
+fn freeze_then_attempt_spend() {
+    let (confidential_proof, mask, _change) = generate_confidential_output_statement(100, None);
+    let (mut test, faucet, faucet_resx) = setup(confidential_proof, None);
+
+    let commitment = commit_amount(&mask, Amount::from(100u64)).unwrap().to_byte_type();
+    let frozen_address = ConfidentialOutputAddress::new(faucet_resx.as_resource_address().unwrap(), commitment);
+
+    let owner = test.owner_proof();
+    test.execute_expect_success(
+        Transaction::builder_localnet()
+            .call_method(faucet, "freeze_confidential_outputs", args![vec![commitment]])
+            .build_and_seal(test.secret_key()),
+        vec![owner.clone()],
+    );
+
+    let (user_account, user_proof, user_key) = test.create_empty_account();
+    let withdraw_proof = generate_withdraw_proof(&mask, 100, None, 0u64);
+
+    let reason = test.execute_expect_failure(
+        Transaction::builder_localnet()
+            .call_method(faucet, "take_free_coins", args![withdraw_proof.proof.clone()])
+            .put_last_instruction_output_on_workspace("coins")
+            .call_method(user_account, "deposit", args![Workspace("coins")])
+            .build_and_seal(&user_key),
+        vec![user_proof.clone()],
+    );
+
+    assert_reject_reason(reason, ResourceError::InvalidSpend {
+        details: format!("Confidential output {frozen_address} is frozen"),
+    });
+
+    test.execute_expect_success(
+        Transaction::builder_localnet()
+            .call_method(faucet, "unfreeze_confidential_outputs", args![vec![commitment]])
+            .build_and_seal(test.secret_key()),
+        vec![owner],
+    );
+
+    test.execute_expect_success(
+        Transaction::builder_localnet()
+            .call_method(faucet, "take_free_coins", args![withdraw_proof.proof])
+            .put_last_instruction_output_on_workspace("coins")
+            .call_method(user_account, "deposit", args![Workspace("coins")])
+            .build_and_seal(&user_key),
+        vec![user_proof],
+    );
+}
+
+/// A pre-existing output that is unfrozen and spent by the same transaction must still be downed. The unfreeze
+/// mutates it, which moves it to the same place the engine holds newly-created substates, and a spend must not
+/// mistake that for "created in this transaction" and collapse it: that would leave it live in global state
+/// with its value already spent.
+#[test]
+fn unfreeze_and_spend_in_one_transaction_downs_the_output() {
+    let (confidential_proof, mask, _change) = generate_confidential_output_statement(100, None);
+    let (mut test, faucet, faucet_resx) = setup(confidential_proof, None);
+
+    let commitment = commit_amount(&mask, Amount::from(100u64)).unwrap().to_byte_type();
+    let output_address = ConfidentialOutputAddress::new(faucet_resx.as_resource_address().unwrap(), commitment);
+
+    let owner = test.owner_proof();
+    test.execute_expect_success(
+        Transaction::builder_localnet()
+            .call_method(faucet, "freeze_confidential_outputs", args![vec![commitment]])
+            .build_and_seal(test.secret_key()),
+        vec![owner.clone()],
+    );
+
+    let (user_account, _user_proof, _user_key) = test.create_empty_account();
+    let withdraw_proof = generate_withdraw_proof(&mask, 100, None, 0u64);
+
+    let result = test.execute_expect_success(
+        Transaction::builder_localnet()
+            .call_method(faucet, "unfreeze_confidential_outputs", args![vec![commitment]])
+            .call_method(faucet, "take_free_coins", args![withdraw_proof.proof])
+            .put_last_instruction_output_on_workspace("coins")
+            .call_method(user_account, "deposit", args![Workspace("coins")])
+            .build_and_seal(test.secret_key()),
+        vec![owner],
+    );
+
+    let diff = result.finalize.any_accept().unwrap();
+    let spent_id = SubstateId::ConfidentialOutput(output_address);
+    assert!(
+        diff.down_iter().any(|(id, _)| *id == spent_id),
+        "spent output was not downed: it stays live in global state. Downs: {:?}",
+        diff.down_iter().map(|(id, _)| id.to_string()).collect::<Vec<_>>()
+    );
+    assert!(
+        !diff.up_iter().any(|(id, _)| *id == spent_id),
+        "spent output must not be upped again"
+    );
+}
+
+/// The commitment is the output's identity: minting the same commitment twice must be rejected by the
+/// duplicate-substate guard, which is what provides network-wide commitment uniqueness now that outputs are
+/// no longer keyed by a per-vault map.
+#[test]
+fn minting_a_duplicate_commitment_is_rejected() {
+    let (confidential_proof, _mask, _change) = generate_confidential_output_statement(100, None);
+    let (mut test, faucet, faucet_resx) = setup(confidential_proof, None);
+
+    let (mint_proof, mint_mask, _change) = generate_confidential_output_statement(42, None);
+    let owner = test.owner_proof();
+    test.execute_expect_success(
+        Transaction::builder_localnet()
+            .call_method(faucet, "mint_more", args![mint_proof.clone()])
+            .build_and_seal(test.secret_key()),
+        vec![owner.clone()],
+    );
+
+    let commitment = commit_amount(&mint_mask, Amount::from(42u64)).unwrap().to_byte_type();
+    let address = ConfidentialOutputAddress::new(faucet_resx.as_resource_address().unwrap(), commitment);
+    let reason = test.execute_expect_failure(
+        Transaction::builder_localnet()
+            .call_method(faucet, "mint_more", args![mint_proof])
+            .build_and_seal(test.secret_key()),
+        vec![owner],
+    );
+
+    assert_reject_reason(reason, RuntimeError::DuplicateSubstate {
+        address: address.into(),
+    });
+}
+
+/// The confidential-withdraw caps must be enforced on the withdraw execution path, not only exist as
+/// standalone checks: one withdraw over `max_withdraws_per_transaction` rejects the whole transaction.
+#[test]
+fn a_transaction_over_the_withdraw_cap_is_rejected() {
+    let (confidential_proof, _mask, _change) = generate_confidential_output_statement(100, None);
+    let (mut test, faucet, _faucet_resx) = setup(confidential_proof, None);
+    let owner = test.owner_proof();
+
+    let max_withdraws = CONFIDENTIAL_LIMITS.max_withdraws_per_transaction;
+    // Revealed funds make each withdraw a revealed-only confidential withdraw: no commitments are needed
+    // and the per-withdraw work is trivial, so only the per-transaction cap is exercised.
+    test.execute_expect_success(
+        Transaction::builder_localnet()
+            .call_method(faucet, "mint_revealed", args![Amount::new(max_withdraws as u128 + 1)])
+            .build_and_seal(test.secret_key()),
+        vec![owner.clone()],
+    );
+
+    let mut builder = Transaction::builder_localnet();
+    for _ in 0..=max_withdraws {
+        builder = builder.call_method(faucet, "take_free_coins", args![
+            ConfidentialWithdrawProof::revealed_withdraw(Amount::new(1))
+        ]);
+    }
+    let reason = test.execute_expect_failure(builder.build_and_seal(test.secret_key()), vec![owner]);
+
+    assert_reject_reason(
+        reason,
+        ArgumentValidationError::MaxConfidentialWithdrawsPerTransactionExceeded { max_withdraws },
+    );
 }

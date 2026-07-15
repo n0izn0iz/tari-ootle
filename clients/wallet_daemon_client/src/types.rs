@@ -68,6 +68,7 @@ use tari_template_abi::{FunctionDef, TemplateDef, version::WasmAbiVersion};
 use tari_template_lib_types::{
     Amount,
     ComponentAddress,
+    ConfidentialOutputAddress,
     EncryptedData,
     NonFungibleId,
     ResourceAddress,
@@ -104,8 +105,11 @@ pub struct CallInstructionRequest {
     #[serde(deserialize_with = "string_or_struct")]
     pub fee_account: ComponentAddressOrName,
     pub max_fee: u64,
+    /// Substates the instructions require as transaction inputs. Needed for any input that cannot be inferred
+    /// from the instructions, e.g. a `ConfidentialOutput` named only by a commitment inside an opaque proof.
     #[serde(default)]
     pub inputs: Vec<SubstateRequirement>,
+    /// If true, inputs inferred from the instructions are added to `inputs`.
     #[serde(default)]
     pub override_inputs: Option<bool>,
     #[serde(default)]
@@ -607,9 +611,9 @@ pub struct ProofsGenerateRequest {
     #[serde(deserialize_with = "opt_string_or_struct")]
     pub account: Option<ComponentAddressOrName>,
     pub resource_address: ResourceAddress,
-    pub destination_public_key: RistrettoPublicKeyBytes,
+    pub destination_address: OotleAddress,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memo: Option<Memo>,
+    pub output_memo: Option<Memo>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -663,7 +667,7 @@ pub struct ConfidentialTransferRequest {
     pub output_to_revealed: bool,
     pub proof_from_badge_resource: Option<ResourceAddress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memo: Option<Memo>,
+    pub output_memo: Option<Memo>,
     pub dry_run: bool,
 }
 
@@ -1503,6 +1507,33 @@ pub struct UtxoInfo {
     pub is_burnt: bool,
     pub is_frozen: bool,
     pub is_on_chain: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "wallet-types/"))]
+pub struct ConfidentialOutputsListRequest {
+    pub resource_address: ResourceAddress,
+    pub account_address: Option<ComponentAddress>,
+    pub filter_by_status: Option<OutputStatus>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "wallet-types/"))]
+pub struct ConfidentialOutputsListResponse {
+    pub outputs: Vec<ConfidentialOutputInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "wallet-types/"))]
+pub struct ConfidentialOutputInfo {
+    /// Address of the output's own substate. It carries the commitment, which is the output's identity.
+    pub address: ConfidentialOutputAddress,
+    /// The vault holding this output. Membership of a vault's commitment list is what authorises the spend.
+    pub vault_id: VaultId,
+    /// The decrypted value. Zero for an output the wallet could not decrypt (`OutputStatus::Invalid`).
+    pub value: Amount,
+    pub status: OutputStatus,
+    pub memo: Option<Memo>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

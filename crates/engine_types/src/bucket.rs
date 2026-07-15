@@ -26,12 +26,19 @@ use serde::{Deserialize, Serialize};
 use tari_crypto::ristretto::RistrettoPublicKey;
 use tari_template_lib::{
     models::BucketId,
-    types::{Amount, NonFungibleId, ResourceAddress, ResourceType, confidential::ConfidentialWithdrawProof},
+    types::{
+        Amount,
+        NonFungibleId,
+        ResourceAddress,
+        ResourceType,
+        confidential::ConfidentialWithdrawProof,
+        crypto::PedersenCommitmentBytes,
+    },
 };
 
 use crate::{
     proof::{ContainerRef, LockedResource, Proof},
-    resource_container::{ResourceContainer, ResourceError},
+    resource_container::{ConfidentialOutputEffects, ResourceContainer, ResourceError},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +71,10 @@ impl Bucket {
         self.resource_container.locked_amount()
     }
 
+    pub fn has_locked_funds(&self) -> bool {
+        self.resource_container.has_locked_funds()
+    }
+
     pub fn resource_address(&self) -> &ResourceAddress {
         self.resource_container.resource_address()
     }
@@ -84,6 +95,10 @@ impl Bucket {
         self.resource_container.into_non_fungible_ids()
     }
 
+    pub fn get_confidential_commitments(&self) -> Option<&BTreeSet<PedersenCommitmentBytes>> {
+        self.resource_container.get_confidential_commitments()
+    }
+
     pub fn non_fungible_ids(&self) -> &BTreeSet<NonFungibleId> {
         self.resource_container.non_fungible_token_ids()
     }
@@ -100,7 +115,7 @@ impl Bucket {
         &mut self,
         proof: ConfidentialWithdrawProof,
         view_key: Option<&RistrettoPublicKey>,
-    ) -> Result<ResourceContainer, ResourceError> {
+    ) -> Result<(ResourceContainer, ConfidentialOutputEffects), ResourceError> {
         self.resource_container.withdraw_confidential(proof, view_key)
     }
 

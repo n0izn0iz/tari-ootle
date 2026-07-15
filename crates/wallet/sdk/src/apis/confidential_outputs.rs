@@ -7,7 +7,7 @@ use tari_crypto::ristretto::{RistrettoPublicKey, pedersen::PedersenCommitment};
 use tari_engine_types::crypto::OutputBody;
 use tari_ootle_common_types::optional::{IsNotFoundError, Optional};
 use tari_ootle_wallet_crypto::{MaskAndValue, kdfs};
-use tari_template_lib::types::{Amount, VaultId, crypto::PedersenCommitmentBytes};
+use tari_template_lib::types::{Amount, ComponentAddress, ResourceAddress, VaultId, crypto::PedersenCommitmentBytes};
 
 use crate::{
     WalletSdkSpec,
@@ -131,7 +131,9 @@ where TSpec: WalletSdkSpec
     ) -> Result<Vec<MaskAndValue>, ConfidentialOutputsApiError> {
         let mut outputs_with_masks = Vec::with_capacity(outputs.len());
         for output in outputs {
-            // Encryption is always done with a DH of the account's public key
+            // Outputs are encrypted to the view key they were recorded against: either via a DH of the
+            // sender's public nonce with that key, or directly with its secret when the wallet encrypted
+            // the output to itself.
             let encryption_key = self.key_manager_api.get_key(output.view_only_key_id)?;
             // Either derive the mask from the sender's public nonce or from the local key manager
             let shared_decrypt_key = match output.sender_public_nonce {
@@ -166,6 +168,18 @@ where TSpec: WalletSdkSpec
             outputs_with_masks.push(decrypted.into_mask_and_value());
         }
         Ok(outputs_with_masks)
+    }
+
+    pub fn outputs_get_many(
+        &self,
+        resource_address: &ResourceAddress,
+        account: Option<&ComponentAddress>,
+        by_status: Option<OutputStatus>,
+    ) -> Result<Vec<ConfidentialOutputModel>, ConfidentialOutputsApiError> {
+        let outputs = self
+            .store
+            .with_read_tx(|tx| tx.confidential_outputs_get_many(resource_address, account, by_status))?;
+        Ok(outputs)
     }
 
     pub fn get_unspent_balance(&self, vault_id: &VaultId) -> Result<Amount, ConfidentialOutputsApiError> {
