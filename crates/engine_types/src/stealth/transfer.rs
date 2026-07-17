@@ -24,6 +24,28 @@ pub struct ValidatedStealthTransfer {
     pub revealed_output_amount: Amount,
 }
 
+/// The native-execution metering points [`validate_transfer`] (plus the per-input spend
+/// authorisation pass) costs for this statement. Charged against the payment-funded allowance
+/// *before* any verification runs, so a non-paying transaction cannot extract the crypto work for
+/// free. Must stay in lock-step with what [`validate_transfer`] actually verifies: a revealed-only
+/// statement (no stealth inputs or outputs) verifies no balance proof and no range proof, so it
+/// prices at zero, and the per-output ElGamal viewable-balance proof is only verified (and only
+/// priced) when the resource carries a view key.
+pub fn transfer_native_points(transfer: &StealthTransferStatement, has_view_key: bool) -> u64 {
+    use crate::limits::NativeExecutionPoints as P;
+    if transfer.inputs_statement.inputs.is_empty() && transfer.outputs_statement.outputs.is_empty() {
+        return 0;
+    }
+    let per_output = P::PER_OUTPUT.saturating_add(if has_view_key {
+        P::PER_OUTPUT_VIEWABLE_SURCHARGE
+    } else {
+        0
+    });
+    P::PER_STATEMENT
+        .saturating_add(per_output.saturating_mul(transfer.outputs_statement.outputs.len() as u64))
+        .saturating_add(P::PER_INPUT.saturating_mul(transfer.inputs_statement.inputs.len() as u64))
+}
+
 pub fn validate_transfer(
     transfer: &StealthTransferStatement,
     view_key: Option<&RistrettoPublicKey>,
