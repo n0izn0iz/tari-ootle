@@ -27,6 +27,17 @@ use crate::{
 
 const LOG_TARGET: &str = "tari::ootle::transaction::transaction";
 
+/// Maximum number of authorization signatures a transaction may carry.
+///
+/// Each signature costs one Ristretto Schnorr verification, performed by every node that receives
+/// the transaction, before any fee is charged. Transaction weight alone bounds this too loosely —
+/// at `SIGNER_FACTOR` weight per signer the per-transaction weight cap permits signature counts in
+/// the hundreds of thousands — so the count is capped directly. The ceiling is well above any
+/// multi-party authorization scheme, which names its signers explicitly; authorization by a large
+/// or open-ended group is expressed through a component's access rules, not through raw
+/// transaction signatures.
+pub const MAX_SIGNATURES_PER_TRANSACTION: usize = 16;
+
 static XTR_REQUIREMENT: SubstateRequirement = SubstateRequirement::new(SubstateId::Resource(TARI_TOKEN), None);
 
 #[derive(Debug, Clone, borsh::BorshSerialize, minicbor::Encode, minicbor::Decode, minicbor::CborLen)]
@@ -84,12 +95,16 @@ impl TransactionV1 {
     }
 
     pub fn verify_all_signatures(&self) -> bool {
-        if !self.seal_signature.verify_v1(&self.body) {
+        // Derived once and shared between the seal and the authorization messages: deriving blob
+        // commitments hashes every blob payload.
+        let blob_hashes = self.body.unsigned_transaction().blobs.hashes();
+        if !self.seal_signature.verify_v1_with_blob_hashes(&self.body, &blob_hashes) {
             debug!(target: LOG_TARGET, "Transaction seal signature is invalid");
             return false;
         }
 
-        self.body.verify_all_signatures(self.seal_signature.public_key())
+        self.body
+            .verify_all_signatures_with_blob_hashes(self.seal_signature.public_key(), &blob_hashes)
     }
 
     pub(crate) fn inputs(&self) -> &IndexSet<SubstateRequirement> {
