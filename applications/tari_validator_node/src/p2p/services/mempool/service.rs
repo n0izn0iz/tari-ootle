@@ -20,7 +20,7 @@
 //   WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //   USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::{collections::HashSet, fmt::Display};
+use std::{collections::HashSet, fmt::Display, mem};
 
 use libp2p::gossipsub::MessageAcceptance;
 use log::*;
@@ -47,11 +47,14 @@ use crate::{
 
 const LOG_TARGET: &str = "tari::validator_node::mempool::service";
 
-const MEM_MAX_TRANSACTIONS_DEDUP_ALLOC: usize = 1_000_000; // 32Mb
+/// Transaction ids the mempool remembers having seen. See [`SeenTransactions`] for the footprint
+/// this implies; it is a cache with a database fallback, so this trades memory against how often a
+/// re-gossiped transaction costs a lookup, not against correctness.
+const MEM_MAX_TRANSACTIONS_DEDUP: usize = 1_000_000;
 
 #[derive(Debug)]
 pub struct MempoolService<TValidator, TStateStore> {
-    transactions: HashSet<TransactionId>,
+    transactions: SeenTransactions,
     mempool_requests: mpsc::Receiver<MempoolRequest>,
     epoch_manager: EpochManagerHandle<PeerAddress>,
     before_execute_validator: TValidator,
@@ -74,12 +77,12 @@ where
         state_store: TStateStore,
         consensus_handle: ConsensusHandle,
         networking: NetworkingHandle<TariMessagingSpec>,
-        rx_gossip: mpsc::UnboundedReceiver<GossipMessage>,
+        rx_gossip: mpsc::Receiver<GossipMessage>,
         #[cfg(feature = "metrics")] metrics: PrometheusMempoolMetrics,
     ) -> Self {
         Self {
             gossip: MempoolGossip::new(networking, rx_gossip),
-            transactions: Default::default(),
+            transactions: SeenTransactions::new(MEM_MAX_TRANSACTIONS_DEDUP),
             mempool_requests,
             epoch_manager,
             before_execute_validator,
@@ -172,9 +175,6 @@ where
             if self.transactions.remove(id) {
                 num_found += 1;
             }
-        }
-        if self.transactions.capacity() > MEM_MAX_TRANSACTIONS_DEDUP_ALLOC {
-            self.transactions.shrink_to(MEM_MAX_TRANSACTIONS_DEDUP_ALLOC);
         }
         num_found
     }
@@ -366,11 +366,126 @@ where
     }
 }
 
+/// Bounded cache of transaction ids the mempool has already seen.
+///
+/// Purely a fast path: [`MempoolService::transaction_exists`] falls through to the state store on a
+/// miss, so forgetting an id costs one extra database read should that transaction arrive again,
+/// and nothing more. That is what makes a hard bound safe here — without one the cache grows with
+/// the unfinalized backlog, which nothing else bounds. It is also what makes coarse eviction
+/// acceptable, which is what keeps the footprint down.
+///
+/// Ids are held in two generations rather than a set alongside an eviction queue: a queue would
+/// store every id a second time, and exact eviction order is worth less than that memory when a
+/// miss is merely a database read. Inserts land in the current generation; when it fills, it
+/// becomes the previous generation and the older one is dropped wholesale. Lookups check both, so
+/// an id is remembered for between `capacity / 2` and `capacity` subsequent inserts.
+///
+/// Footprint is roughly `capacity` × 33 bytes across the two tables, rounded up to whatever
+/// power-of-two bucket count each needs — so tens of MiB at the capacity used here, against
+/// roughly double that for a set plus a queue.
+#[derive(Debug)]
+struct SeenTransactions {
+    current: HashSet<TransactionId>,
+    previous: HashSet<TransactionId>,
+    generation_capacity: usize,
+}
+
+impl SeenTransactions {
+    fn new(capacity: usize) -> Self {
+        Self {
+            current: HashSet::new(),
+            previous: HashSet::new(),
+            generation_capacity: capacity.div_ceil(2).max(1),
+        }
+    }
+
+    fn contains(&self, id: &TransactionId) -> bool {
+        self.current.contains(id) || self.previous.contains(id)
+    }
+
+    fn insert(&mut self, id: TransactionId) {
+        if self.contains(&id) {
+            return;
+        }
+        if self.current.len() >= self.generation_capacity {
+            self.previous = mem::take(&mut self.current);
+        }
+        self.current.insert(id);
+    }
+
+    fn remove(&mut self, id: &TransactionId) -> bool {
+        // Which generation holds the id is not tracked, so both are cleared.
+        let was_current = self.current.remove(id);
+        let was_previous = self.previous.remove(id);
+        was_current || was_previous
+    }
+
+    fn len(&self) -> usize {
+        self.current.len() + self.previous.len()
+    }
+}
+
 fn handle<T, E: Display>(reply: oneshot::Sender<Result<T, E>>, result: Result<T, E>) {
     if let Err(ref e) = result {
         error!(target: LOG_TARGET, "Request failed with error: {}", e);
     }
     if reply.send(result).is_err() {
         error!(target: LOG_TARGET, "Requester abandoned request");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(n: u8) -> TransactionId {
+        TransactionId::new([n; 32])
+    }
+
+    #[test]
+    fn evicts_oldest_ids_beyond_capacity() {
+        let mut seen = SeenTransactions::new(2);
+        seen.insert(id(1));
+        seen.insert(id(2));
+        seen.insert(id(3));
+
+        assert!(!seen.contains(&id(1)), "the oldest id is evicted");
+        assert!(seen.contains(&id(2)));
+        assert!(seen.contains(&id(3)));
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn reinserting_a_known_id_does_not_consume_capacity() {
+        let mut seen = SeenTransactions::new(4);
+        for _ in 0..10 {
+            seen.insert(id(1));
+        }
+        assert_eq!(seen.len(), 1);
+        assert!(seen.previous.is_empty(), "duplicates must not drive a rotation");
+    }
+
+    #[test]
+    fn removed_ids_are_forgotten_from_either_generation() {
+        let mut seen = SeenTransactions::new(2);
+        seen.insert(id(1));
+        seen.insert(id(2));
+        // One id per generation at this capacity, so these are now in different generations.
+        assert!(seen.remove(&id(1)));
+        assert!(seen.remove(&id(2)));
+        assert!(!seen.contains(&id(1)));
+        assert!(!seen.contains(&id(2)));
+        assert_eq!(seen.len(), 0);
+        assert!(!seen.remove(&id(1)), "removing an unknown id reports nothing found");
+    }
+
+    #[test]
+    fn total_retained_never_exceeds_capacity() {
+        let mut seen = SeenTransactions::new(8);
+        for n in 0..=255u8 {
+            seen.insert(id(n));
+            assert!(seen.len() <= 8, "cache grew past its bound at id {n}");
+        }
+        assert!(seen.contains(&id(255)), "the most recent id is always retained");
     }
 }

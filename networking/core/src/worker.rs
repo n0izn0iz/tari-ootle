@@ -666,7 +666,9 @@ where
                 length,
             }) => {
                 info!(target: LOG_TARGET, "📧 Rx Messaging: peer {peer_id} ({length} bytes)");
-                let _ignore = self.messaging_mode.send_message(peer_id, message);
+                if let Err(e) = self.messaging_mode.send_message(peer_id, message, length) {
+                    warn!(target: LOG_TARGET, "📧 Inbound message dropped: {e}");
+                }
             },
             Messaging(event) => {
                 debug!(target: LOG_TARGET, "ℹ️ Messaging event: {:?}", event);
@@ -758,12 +760,12 @@ where
         // report `Ignore` here rather than leaving the message pinned in the validation cache.
         let topic = message.topic.clone();
         let len = message.data.len();
-        if let Err(e) = self.messaging_mode.send_gossip_message(GossipMessage {
+        if let Err(e) = self.messaging_mode.send_gossip_message(GossipMessage::new(
             source,
             propagation_source,
-            message_id: message_id.clone(),
+            message_id.clone(),
             message,
-        }) {
+        )) {
             warn!(target: LOG_TARGET, "📢 Gossipsub message failed to be handled: {}", e);
             self.report_gossip_validation(
                 &message_id,
