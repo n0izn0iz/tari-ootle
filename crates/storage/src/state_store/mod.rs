@@ -268,6 +268,10 @@ pub trait StateStoreReadTransaction: Sized {
     fn substates_any_exist<'a, I>(&self, substates: I) -> Result<bool, StorageError>
     where I: IntoIterator<Item = VersionedSubstateIdRef<'a>>;
 
+    /// Returns true if any version of the given substate id exists, up or down. A pure key-existence
+    /// check — cheaper than fetching the head version when the caller does not need it.
+    fn substates_exists_any_version(&self, substate_id: &SubstateId) -> Result<bool, StorageError>;
+
     /// Returns an iterator of all substates in the given shard, starting from the given state version (inclusive).
     /// It returns substates, ordered by state version however, the ordering within state versions is by the node key,
     /// meaning it is essentially random. WARNING: do not use this as it only works when all stale state tree nodes
@@ -442,6 +446,14 @@ pub trait StateStoreWriteTransaction {
         &mut self,
         transaction: I,
     ) -> Result<(), StorageError>;
+
+    /// Forgets the node-local finalized bookkeeping for a transaction: the finalized marker and all
+    /// recorded executions. This never reverts committed state — a commit's effects, fees and
+    /// receipt substate live in synced state — it only makes the id appear unsequenced to this
+    /// node's records. Used to give an aborted transaction a fresh lifecycle, and by record GC to
+    /// prune old bookkeeping; committed ids remain refused via the receipt-existence check, which
+    /// does not depend on these records.
+    fn transactions_finalized_remove(&mut self, tx_id: &TransactionId) -> Result<(), StorageError>;
 
     // -------------------------------- Transaction Executions -------------------------------- //
 
