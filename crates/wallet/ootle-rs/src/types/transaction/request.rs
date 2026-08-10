@@ -61,13 +61,20 @@ impl<State> TransactionRequest<State> {
 }
 
 impl TransactionRequest<WithTx> {
+    /// The transaction with the caller's authorizations attached, but unsealed. Only [`build`](Self::build) can add
+    /// the seal signer's own authorizations, since those commit to the key it seals with.
     pub fn build_unsealed(self) -> UnsealedTransaction {
-        self.state.0.finish()
+        self.state
+            .0
+            .with_signatures(self.authorizations.into_iter().map(|a| a.into_signature()).collect())
     }
 
     pub async fn build(self, seal_signer: &dyn TransactionSealSigner) -> WalletResult<Transaction> {
-        let builder = self.state.0;
-        let unsealed = builder.with_signatures(self.authorizations.into_iter().map(|a| a.into_signature()).collect());
+        let unsigned = self.state.0;
+        let mut authorizations = self.authorizations;
+        authorizations.extend(seal_signer.authorizations_for(&unsigned).await?);
+
+        let unsealed = unsigned.with_signatures(authorizations.into_iter().map(|a| a.into_signature()).collect());
         let final_tx = seal_signer.seal_transaction(unsealed).await?;
         Ok(final_tx)
     }
