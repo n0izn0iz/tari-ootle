@@ -17,7 +17,14 @@ use tari_engine_types::{
 };
 use tari_ootle_common_types::{SubstateRequirement, optional::Optional};
 use tari_ootle_transaction::{Transaction, args};
-use tari_ootle_wallet_crypto::{OutputWitness, StealthInputWitness, StealthOutputWitness, memo::Memo};
+use tari_ootle_wallet_crypto::{
+    OutputWitness,
+    StealthCryptoApiError,
+    StealthInputWitness,
+    StealthOutputWitness,
+    WalletCryptoError,
+    memo::Memo,
+};
 use tari_ootle_wallet_sdk::{
     apis::{
         confidential_transfer::ConfidentialTransferParams,
@@ -1395,6 +1402,14 @@ pub async fn handle_create_stealth_transfer_statement(
             ));
         }
 
+        // Checked before any input is locked: a malformed or silently-discarded `pay_to` is a request error, and
+        // rejecting it here avoids taking a lock this request can never use.
+        for output in &req.outputs {
+            output
+                .validate_pay_to()
+                .map_err(|reason| invalid_params("pay_to", Some(reason)))?;
+        }
+
         let amount_to_spend = req.total_output_amount();
 
         let inputs = if let Some(utxo_addresses) = req.input_selection.as_specific() {
@@ -1471,7 +1486,8 @@ pub async fn handle_create_stealth_transfer_statement(
                     })?,
                 outputs,
                 output_revealed_amount,
-            })?;
+            })
+            .map_err(map_statement_construction_error)?;
 
         utxo_signers.extend(inputs.iter().flat_map(|i| &i.inputs).map(|i| StealthUtxoSpendKeyId {
             account_key_id: sender_key_id,
@@ -1506,6 +1522,29 @@ fn map_specific_selection_error(err: StealthOutputsApiError) -> anyhow::Error {
         )
     } else {
         err.into()
+    }
+}
+
+/// Map a `generate_transfer_statement` failure to an RPC error. `WalletCryptoError::InvalidArgument` names a
+/// malformed field of the request — a `PayTo` condition set the engine could never admit, a negative revealed
+/// amount, an unbalanced covenant partition — so it is reported as a caller error carrying that field name;
+/// everything else propagates unchanged as a server error.
+///
+/// The variant reaches this handler by two routes: directly, from the output-authorization step, and wrapped in
+/// `StealthCryptoApiError` from statement construction. Both must be recognised.
+fn map_statement_construction_error(err: StealthOutputsApiError) -> anyhow::Error {
+    let invalid_argument = match &err {
+        StealthOutputsApiError::WalletCrypto(e) |
+        StealthOutputsApiError::Crypto(StealthCryptoApiError::WalletCryptoError(e)) => Some(e),
+        _ => None,
+    };
+
+    match invalid_argument {
+        Some(WalletCryptoError::InvalidArgument { name, details }) => {
+            debug!(target: LOG_TARGET, "Rejected stealth transfer statement: {err}");
+            invalid_params(name, Some(details.clone()))
+        },
+        _ => err.into(),
     }
 }
 
@@ -2373,5 +2412,159 @@ mod create_stealth_transfer_statement_handler_tests {
             );
             assert_eq!(stored.lock_id, Some(response.lock_id));
         }
+    }
+
+    /// Builds a balanced single-output request paying the whole of one 100-value input to `conditions`.
+    fn pay_to_conditions_request(
+        test: &StatementTest,
+        input: &StealthOutputModel,
+        conditions: Vec<SpendCondition>,
+    ) -> AccountsCreateStealthTransferStatementRequest {
+        AccountsCreateStealthTransferStatementRequest {
+            requests: vec![TransferStatementRequest {
+                sender_account: test.account.into(),
+                resource_address: test.stealth_resource,
+                input_selection: InputSelection::Specific {
+                    utxo_addresses: vec![input.to_utxo_address()],
+                },
+                outputs: vec![TransferOutput {
+                    address: account_ootle_address(test),
+                    revealed_amount: Amount::zero(),
+                    blinded_amount: 100,
+                    memo: None,
+                    pay_to: PayTo::Conditions(conditions),
+                }],
+            }],
+        }
+    }
+
+    /// Asserts a request is rejected as `InvalidParams` naming `expected_field`, and that the named input was never
+    /// locked — these are all request errors caught before any input selection runs.
+    async fn assert_rejected_without_locking(
+        test: &StatementTest,
+        input: &StealthOutputModel,
+        request: AccountsCreateStealthTransferStatementRequest,
+        expected_field: &str,
+    ) {
+        let bearer = test.bearer(&test.transfer_and_read_scopes());
+        let err = handle_create_stealth_transfer_statement(&test.context, Some(&bearer), request)
+            .await
+            .expect_err("a malformed pay_to must be rejected");
+
+        let message = assert_invalid_params(&err).to_string();
+        assert!(
+            message.contains(expected_field),
+            "expected the offending field `{expected_field}` to be named, got: {message}"
+        );
+
+        let stored = stored_output(test, &input.commitment);
+        assert!(
+            matches!(stored.status, OutputStatus::Unspent),
+            "expected Unspent, got {:?}",
+            stored.status
+        );
+        assert_eq!(stored.lock_id, None);
+    }
+
+    /// A condition set that cannot form a tree is a malformed request, not a server fault.
+    #[tokio::test]
+    async fn empty_condition_set_is_rejected_as_invalid_params() {
+        let test = setup().await;
+        let input = insert_valid_output(&test, 100);
+        let request = pay_to_conditions_request(&test, &input, vec![]);
+        assert_rejected_without_locking(&test, &input, request, "conditions").await;
+    }
+
+    /// Duplicate leaves are likewise a caller error: the tree rejects them rather than silently deduplicating, so the
+    /// caller learns the condition set is malformed instead of receiving a root over fewer leaves than they supplied.
+    #[tokio::test]
+    async fn duplicate_condition_leaves_are_rejected_as_invalid_params() {
+        let test = setup().await;
+        let input = insert_valid_output(&test, 100);
+
+        let (claim_condition, _) =
+            htlc_conditions(b"preimage", 4_242, htlc_participant_key(1), htlc_participant_key(2));
+        let request = pay_to_conditions_request(&test, &input, vec![claim_condition.clone(), claim_condition]);
+
+        assert_rejected_without_locking(&test, &input, request, "conditions").await;
+    }
+
+    /// An empty conjunction forms a perfectly good one-leaf tree, but the engine refuses to evaluate such a leaf, so
+    /// the only committed spend path could never be taken and the funds would be unrecoverable.
+    #[tokio::test]
+    async fn structurally_inadmissible_leaf_is_rejected_as_invalid_params() {
+        let test = setup().await;
+        let input = insert_valid_output(&test, 100);
+        let request = pay_to_conditions_request(&test, &input, vec![SpendCondition::all([])]);
+        assert_rejected_without_locking(&test, &input, request, "conditions").await;
+    }
+
+    /// `pay_to` gates the blinded output. A revealed-only output produces no stealth output at all, so honouring the
+    /// request as written is impossible: reject it rather than deposit the funds ungated.
+    #[tokio::test]
+    async fn gated_output_with_no_blinded_amount_is_rejected_as_invalid_params() {
+        let test = setup().await;
+        let input = insert_valid_output(&test, 100);
+
+        let (claim_condition, _) =
+            htlc_conditions(b"preimage", 4_242, htlc_participant_key(1), htlc_participant_key(2));
+        let mut request = pay_to_conditions_request(&test, &input, vec![claim_condition]);
+        request.requests[0].outputs[0].blinded_amount = 0;
+        request.requests[0].outputs[0].revealed_amount = Amount::from(100u64);
+
+        assert_rejected_without_locking(&test, &input, request, "pay_to").await;
+    }
+}
+
+#[cfg(test)]
+mod map_statement_construction_error_tests {
+    use axum_jrpc::error::{JsonRpcError, JsonRpcErrorReason};
+
+    use super::*;
+
+    fn invalid_argument() -> WalletCryptoError {
+        WalletCryptoError::InvalidArgument {
+            name: "covenant",
+            details: "a covenant partition may not receive more value than it spends".to_string(),
+        }
+    }
+
+    fn assert_maps_to_invalid_params(err: StealthOutputsApiError) {
+        let mapped = map_statement_construction_error(err);
+        let rpc = mapped
+            .downcast_ref::<JsonRpcError>()
+            .unwrap_or_else(|| panic!("expected a JsonRpcError, got: {mapped}"));
+        assert!(
+            matches!(rpc.error_reason(), JsonRpcErrorReason::InvalidParams),
+            "expected InvalidParams, got: {:?}",
+            rpc.error_reason()
+        );
+        assert!(
+            rpc.to_string().contains("covenant"),
+            "expected the offending field to be named, got: {rpc}"
+        );
+    }
+
+    /// The output-authorization step returns the error directly.
+    #[test]
+    fn maps_a_direct_invalid_argument() {
+        assert_maps_to_invalid_params(StealthOutputsApiError::WalletCrypto(invalid_argument()));
+    }
+
+    /// Statement construction returns the same error wrapped a layer deeper. Both routes reach this handler, so
+    /// recognising only the direct one would leave the wrapped case reported as a server fault.
+    #[test]
+    fn maps_an_invalid_argument_wrapped_by_the_crypto_api() {
+        assert_maps_to_invalid_params(StealthOutputsApiError::Crypto(invalid_argument().into()));
+    }
+
+    /// Anything that is not a malformed argument stays a server error.
+    #[test]
+    fn leaves_other_failures_as_server_errors() {
+        let mapped = map_statement_construction_error(StealthOutputsApiError::InsufficientFunds);
+        assert!(
+            mapped.downcast_ref::<JsonRpcError>().is_none(),
+            "expected a plain error, got a JsonRpcError: {mapped}"
+        );
     }
 }
