@@ -109,7 +109,8 @@ use tari_template_lib::{
         stealth::StealthTransferStatement,
     },
 };
-pub use tracker::StateTracker;
+pub use tracker::{FinalizedState, StateTracker};
+pub use working_state::ChargeableState;
 
 use crate::runtime::{locking::LockedSubstate, scope::PushCallFrame};
 

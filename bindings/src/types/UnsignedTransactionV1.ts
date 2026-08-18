@@ -13,6 +13,12 @@ export type UnsignedTransactionV1 = {
    */
   inputs: Array<SubstateRequirement>;
   min_epoch: Epoch | null;
+  /**
+   * The last epoch in which this transaction may be sequenced. Mandatory: every transaction has a
+   * bounded lifetime, capped at `ConsensusConstants::max_transaction_validity_epochs` past the
+   * current epoch, so a transaction's death is deterministic and an aborted attempt cannot be
+   * retried indefinitely.
+   */
   max_epoch: Epoch;
   is_seal_signer_authorized: boolean;
   dry_run: boolean;

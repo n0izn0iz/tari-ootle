@@ -9,4 +9,5 @@ export type AbortReason =
   | "OneOrMoreInputsNotFound"
   | "InsufficientFeesPaid"
   | "FeePaymentInMainIntent"
-  | "EpochExpired";
+  | "EpochExpired"
+  | "ValidityWindowTooLong";

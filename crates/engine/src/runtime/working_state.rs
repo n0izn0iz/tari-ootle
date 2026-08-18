@@ -93,6 +93,47 @@ use crate::{
 
 const LOG_TARGET: &str = "dan::engine::runtime::working_state";
 
+/// The view of a transaction's state that a runtime module is given when charging for it.
+///
+/// Exposes what a charge computed from the state needs to read — what will be persisted, and the fee
+/// state to record against — and nothing that would let a module alter the state it is pricing. It
+/// also keeps [`WorkingState`] itself, which is a large internal surface, out of the public module
+/// API that [`super::RuntimeModule`] defines.
+pub struct ChargeableState<'a, TStore> {
+    state: &'a mut WorkingState<TStore>,
+}
+
+impl<'a, TStore> ChargeableState<'a, TStore> {
+    pub(super) fn new(state: &'a mut WorkingState<TStore>) -> Self {
+        Self { state }
+    }
+}
+
+impl<TStore: StateReader> ChargeableState<'_, TStore> {
+    /// The substates this state will persist, keyed by id.
+    pub fn substates_to_persist(&mut self) -> &IndexMap<SubstateId, SubstateValue> {
+        self.state.mutated_substates()
+    }
+
+    /// How many of those substates did not previously exist in the state store.
+    pub fn count_newly_created_substates(&self) -> Result<usize, RuntimeError> {
+        self.state.count_newly_created_substates()
+    }
+
+    /// The storage footprint of the transaction receipt this state will finalize into.
+    pub fn transaction_receipt_size(&mut self) -> Result<usize, RuntimeError> {
+        self.state.transaction_receipt_size()
+    }
+
+    pub fn fee_state(&self) -> &FeeState {
+        self.state.fee_state()
+    }
+
+    pub fn fee_state_mut(&mut self) -> &mut FeeState {
+        self.state.fee_state_mut()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct WorkingState<TStore> {
     transaction_hash: Hash32,
@@ -1314,6 +1355,20 @@ impl<TStore: StateReader> WorkingState<TStore> {
 
     pub fn set_last_instruction_output(&mut self, output: IndexedValue) {
         self.last_instruction_output = Some(output);
+    }
+
+    /// Counts substates in the to-persist set that did not previously exist in the state store.
+    /// Used by the fee module to charge a slot-allocation premium on top of per-byte storage.
+    pub fn count_newly_created_substates(&self) -> Result<usize, RuntimeError> {
+        let mut count = 0;
+        for id in self.store.mutated_substates().keys() {
+            match self.store.get_unmodified_substate(id) {
+                Ok(_) => {},
+                Err(RuntimeError::SubstateNotFound { .. }) => count += 1,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(count)
     }
 
     /// The storage footprint of the transaction receipt this state will finalize into.
