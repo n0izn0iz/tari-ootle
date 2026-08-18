@@ -1100,7 +1100,11 @@ where
 
         // eprintln!("{}: {}", log_level, message);
         log::log!(target: "tari::ootle::engine::runtime", log_level, "{}", message);
+        let size_bytes = message.len();
+        // Charged after the entry is accepted, so the bytes billed for are the bytes retained: the
+        // size and count limits `add_log` enforces are what decides that.
         self.tracker.add_log(LogEntry::new(level, message))?;
+        self.invoke_modules_on_runtime_event(RuntimeEvent::LogEmitted { size_bytes })?;
         Ok(())
     }
 

@@ -9,9 +9,33 @@ use serde::{Deserialize, Serialize};
 /// The burn is taken over the running fee total, so it re-multiplies every term that can make a
 /// real run cost more than the dry run that estimated it. A network configured above this rate
 /// under-states `FeeReceipt::required_fees`, and every submission built from a dry run is then
-/// rejected as underpaid — `every_shipped_network_stays_within_the_burn_rate_ceiling` holds the
-/// shipped networks to it.
+/// rejected as underpaid — [`ExhaustBurnRate`] holds every configured rate to it.
 pub const MAX_EXHAUST_BURN_RATE_BPS: u16 = 10_000;
+
+/// An exhaust burn rate in basis points, at or below [`MAX_EXHAUST_BURN_RATE_BPS`].
+///
+/// The ceiling is a fee-estimation invariant rather than a policy preference: it is the rate
+/// [`FEE_ESTIMATE_ALLOWANCE`] is derived against, so a network burning above it under-states what
+/// a dry run reports as required. A rate reaches consensus only through this type, so no such
+/// network can be configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExhaustBurnRate(u16);
+
+impl ExhaustBurnRate {
+    /// Panics if `bps` is above [`MAX_EXHAUST_BURN_RATE_BPS`]. The network constants are const
+    /// items, so for them that panic is a compile error.
+    pub const fn new(bps: u16) -> Self {
+        assert!(
+            bps <= MAX_EXHAUST_BURN_RATE_BPS,
+            "exhaust burn rate is above MAX_EXHAUST_BURN_RATE_BPS"
+        );
+        Self(bps)
+    }
+
+    pub const fn as_bps(self) -> u16 {
+        self.0
+    }
+}
 
 /// The allowance a dry-run estimate carries on top of what it metered, so that a real run of the
 /// same transaction at a different `max_fee` can never cost more than the estimate.
@@ -239,6 +263,9 @@ impl Default for FeeReceipt {
 pub enum FeeSource {
     #[n(0)]
     Initial = 0,
+    /// Engine host calls: a flat per-call cost, plus the per-byte cost of a log's message. Two
+    /// unlike prices share this source because a source of its own would widen
+    /// [`FeeReceipt::widest`] and so the receipt size bound on every transaction.
     #[n(1)]
     RuntimeCall = 1,
     #[n(2)]
@@ -375,6 +402,21 @@ pub struct FeeCostBreakdown {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_burn_rate_holds_every_value_up_to_the_ceiling() {
+        assert_eq!(ExhaustBurnRate::new(0).as_bps(), 0);
+        assert_eq!(
+            ExhaustBurnRate::new(MAX_EXHAUST_BURN_RATE_BPS).as_bps(),
+            MAX_EXHAUST_BURN_RATE_BPS
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "exhaust burn rate is above MAX_EXHAUST_BURN_RATE_BPS")]
+    fn a_burn_rate_above_the_ceiling_panics_where_const_evaluation_cannot_catch_it() {
+        ExhaustBurnRate::new(MAX_EXHAUST_BURN_RATE_BPS + 1);
+    }
 
     #[test]
     fn fee_source_all_is_exhaustive() {
