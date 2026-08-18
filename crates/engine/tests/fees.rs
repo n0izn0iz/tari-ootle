@@ -250,6 +250,65 @@ fn a_fee_intent_commit_is_not_charged_for_the_state_it_abandons() {
     );
 }
 
+/// Compute is funded by what the payment has left after the state the transaction falls back to
+/// committing, not by the whole payment.
+///
+/// Funding it from the whole payment let a transaction spend the lot on execution and leave its own
+/// fee-intent commit unaffordable. That settles as a rejection which collects nothing, so the work
+/// was done and never paid for — repeatably, with the same funds each time.
+#[test]
+fn compute_cannot_consume_what_the_fee_intent_commit_needs() {
+    for burn_rate_bps in [0, 500, 10_000] {
+        spend_the_whole_allowance_and_still_pay(burn_rate_bps);
+    }
+}
+
+fn spend_the_whole_allowance_and_still_pay(burn_rate_bps: u16) {
+    const MAX_FEE: u64 = 100_000;
+
+    let mut test = TemplateTest::new(CRATE_PATH, vec!["tests/templates/infinity_loop"]);
+    let (account, owner_token, key) = test.create_funded_account();
+    test.enable_fees();
+
+    // Run at a burn too, since the burn is taken over the charges rather than deducted from the
+    // payment: an allowance computed against the raw payment leaves nothing to pay it with.
+    test.set_burn_rate_bps(burn_rate_bps);
+
+    // A loop that never returns: it runs until the compute allowance stops it, whatever that
+    // allowance is, so the transaction always spends every point it is given.
+    let template = test.get_template_address("InfinityLoopTest");
+    let result = test.execute_expect_commit(
+        test.transaction()
+            .pay_fee_from_component(account, MAX_FEE)
+            .call_function(template, "infinity_loop", args![])
+            .build_and_seal(&key),
+        vec![owner_token],
+    );
+
+    // The main intent traps, so only the fee intent commits — and what is left of the payment still
+    // covers it, so the fees are collected.
+    assert!(
+        matches!(result.finalize.result, TransactionResult::AcceptFeeRejectRest(..)),
+        "expected a fee-intent commit at {burn_rate_bps} bps, got {:?}",
+        result.finalize.result
+    );
+    let receipt = &result.finalize.fee_receipt;
+    assert!(receipt.is_paid_in_full(), "at {burn_rate_bps} bps");
+    assert_eq!(
+        receipt.total_fees_charged(),
+        receipt.total_fees_paid(),
+        "at {burn_rate_bps} bps the transaction should spend the payment down to the microtari"
+    );
+    // The burn's rounding leaves a few microtari of the payment unspent, so this is "nearly all of
+    // it" rather than exactly all: what matters is that the allowance is sized against the payment
+    // and not beyond it.
+    assert!(
+        receipt.total_fees_paid() > MAX_FEE - 100,
+        "at {burn_rate_bps} bps only {} of {MAX_FEE} was spent",
+        receipt.total_fees_paid()
+    );
+}
+
 /// A fee-intent commit persists real state, so it happens only when the payment covers what that
 /// state costs. When it does not, nothing commits — there is no shallower checkpoint to fall back
 /// to, and committing anyway would be a way to write state for free.
@@ -293,7 +352,7 @@ fn an_unaffordable_fee_intent_commits_nothing() {
     // their fee to, and on a rejection there is nowhere else to read it from.
     let charged = result.finalize.fee_receipt.total_fees_charged();
     assert!(charged > FEE, "expected the metered charges, got {charged}");
-    assert!(result.finalize.fee_receipt.required_fees() > FEE);
+    assert!(result.finalize.required_fees() > FEE);
 
     let balance = test
         .read_only_state_store()
@@ -531,8 +590,9 @@ fn failure_pay_fee_in_main_instructions() {
 
     let reason = test.execute_expect_failure(
         Transaction::builder_localnet(Epoch(1))
-            // Pay in fee intent, enough to pass this step
-            .pay_fee_from_component(account, 100u64)
+            // Pay in the fee intent enough to cover committing it, so the transaction reaches the
+            // main instructions where the violation is.
+            .pay_fee_from_component(account, 2000u64)
             // Call pay_fee in main instructions (outside fee instructions) not permitted
             .call_method(account, "pay_fee", args![100])
             .call_method(account, "balance", args![STEALTH_TARI_RESOURCE_ADDRESS])
