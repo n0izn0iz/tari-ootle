@@ -69,6 +69,14 @@ use crate::{
     validator_node_client::{add_outputs_from_diff, parse_arg},
 };
 
+/// Fee allowance for the transactions these helpers build.
+///
+/// It is an upper bound, not a payment — whatever the transaction does not spend is refunded — so it
+/// is set well above what any of these cost rather than tuned to them. A tight value has to be
+/// revisited every time the engine's pricing moves, and its failure mode is a whole feature file
+/// failing on `Insufficient fees paid`.
+const MAX_FEE: u64 = 50_000;
+
 pub async fn claim_fees(
     world: &mut TariWorld,
     wallet_daemon_name: String,
@@ -86,7 +94,7 @@ pub async fn claim_fees(
     let request = ClaimValidatorFeesRequest {
         account: Some(ComponentAddressOrName::Name(account_name)),
         claim_key_index: None,
-        max_fee: 1500,
+        max_fee: MAX_FEE,
         shards: vec![
             stats
                 .committee_info
@@ -267,7 +275,7 @@ pub async fn create_account_with_free_coins(world: &mut TariWorld, account_name:
 
     let request = AccountsCreateFreeTestCoinsRequest {
         account: account.account.component_address.into(),
-        max_fee: 1500,
+        max_fee: MAX_FEE,
     };
 
     let resp = client.create_free_test_coins(request).await.unwrap();
@@ -310,7 +318,7 @@ pub async fn mint_new_nft_on_account(
         account: ComponentAddressOrName::Name(account_name.clone()),
         mutable_data: metadata,
         number_to_mint: 1,
-        max_fee: Some(1500),
+        max_fee: Some(MAX_FEE),
     };
     let resp = client
         .mint_faucet_nft(request)
@@ -446,7 +454,7 @@ pub async fn submit_manifest_with_signing_keys(
     let instructions = parse_manifest(&manifest_content, globals, HashMap::new(), Default::default()).unwrap();
 
     let transaction = transaction_builder()
-        .pay_fee_from_component(account.component_address, 5000u64)
+        .pay_fee_from_component(account.component_address, MAX_FEE)
         .with_instructions(instructions.instructions)
         .with_min_epoch(min_epoch)
         .then(|b| match max_epoch {
@@ -538,7 +546,7 @@ pub async fn submit_manifest(
     let owner_key_id = account.owner_key_id.expect("Account has no owner key id for signing");
 
     let transaction = transaction_builder()
-        .pay_fee_from_component(account.component_address, 5000u64)
+        .pay_fee_from_component(account.component_address, MAX_FEE)
         .with_instructions(instructions.instructions)
         .with_min_epoch(min_epoch)
         .then(|b| match max_epoch {
@@ -658,7 +666,7 @@ pub async fn create_component(
     let owner_key_id = account.owner_key_id.expect("Account has no owner key id for signing");
 
     let transaction = transaction_builder()
-        .pay_fee_from_component(account.component_address, 5000u64)
+        .pay_fee_from_component(account.component_address, MAX_FEE)
         .call_function(template_address, function_call, args)
         .with_min_epoch(min_epoch)
         .then(|b| match max_epoch {
@@ -764,7 +772,7 @@ pub async fn call_component(
     };
 
     let tx = transaction_builder()
-        .pay_fee_from_component(account_component_address, 1000u64)
+        .pay_fee_from_component(account_component_address, MAX_FEE)
         .call_method(source_component_address, &function_call, vec![])
         .with_inputs(inputs)
         .build_unsigned();
@@ -817,7 +825,7 @@ pub async fn concurrent_call_component(
         let acc = account.clone();
         let clt = client.clone();
         let tx = transaction_builder()
-            .pay_fee_from_component(account_component_address, 1000u64)
+            .pay_fee_from_component(account_component_address, MAX_FEE)
             .call_method(source_component_address, &function_call, vec![])
             .build_unsigned();
         join_set.spawn(submit_unsigned_tx_and_wait_for_response(clt, tx, acc, true));
