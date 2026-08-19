@@ -13,8 +13,10 @@ use tari_engine_types::{
     commit_result::RejectReason,
     component::derive_component_address_from_public_key,
     confidential::ClaimBurnOutputData,
+    fees::FEE_ESTIMATE_ALLOWANCE,
     substate::SubstateId,
 };
+use tari_ootle_app_utilities::fee_tables::fee_rates_by_network;
 use tari_ootle_common_types::{Epoch, SubstateRequirement, optional::Optional};
 use tari_ootle_transaction::{Transaction, args};
 use tari_ootle_wallet_crypto::{
@@ -1307,11 +1309,20 @@ pub async fn handle_stealth_transfer(
         // the fee decides which UTXOs are spent and whether any change is left over. A change output
         // is another stealth output, and another output is another `PER_OUTPUT` of verification —
         // enough that an estimate taken at the caller's guessed fee prices a shape the real
-        // submission will not have. Rebuild at each figure reported until building at it needs no
-        // more than it, then answer with the run that named it, which is a figure the caller can
-        // submit at.
+        // submission will not have.
+        //
+        // Settling that costs nothing when the shape is one the static estimate prices: rebuild
+        // locally until a build pays for itself, and spend a single round trip confirming it.
+        // Otherwise fall back to settling over the wire — rebuild at each figure reported until
+        // building at it needs no more than it, then answer with the run that named it, which is a
+        // figure the caller can submit at.
+        let fee_rates = fee_rates_by_network(network);
         let mut candidate: Option<StealthTransferResponse> = None;
         let mut rounds = 0usize;
+        let mut static_rounds = 0usize;
+        // Whether the static estimate is still trusted for this request. It is dropped for good the
+        // first time a dry run disagrees with it: past that the wire rounds settle the fee alone.
+        let mut settle_statically = true;
 
         loop {
             let max_fee_this_round = params.max_fee;
@@ -1356,11 +1367,46 @@ pub async fn handle_stealth_transfer(
             let transaction = sdk.signer_api().sign(transfer.main_signer.key_id, transaction)?;
 
             if req.dry_run {
+                // Price the shape this build produced and rebuild until the price agrees with the
+                // fee the build was made at. Rebuilding costs local proof generation and nothing
+                // else, so the fixed point is reached without a round trip.
+                //
+                // Both directions matter. An estimate above the fee says the shape cannot pay for
+                // itself, so the next build selects differently and dry-running this one would
+                // measure a transaction that is about to change. An estimate below it says the
+                // caller's `max_fee` is a ceiling rather than a price, and answering with the
+                // ceiling would have them reveal — unrefundably — far more than the transfer costs.
+                let mut settled_statically = false;
+                if let Some(shape) = transfer.statically_priced_shape.filter(|_| settle_statically) {
+                    let estimate = shape
+                        .with_transaction_weight(transaction.calculate_transaction_weight().as_u64())
+                        .estimate_fee(&fee_rates)
+                        .saturating_add(FEE_ESTIMATE_ALLOWANCE);
+                    if estimate != params.max_fee && static_rounds < MAX_STATIC_SETTLE_ROUNDS {
+                        params.max_fee = estimate;
+                        static_rounds += 1;
+                        // No round named this fee, so an earlier round's answer no longer describes
+                        // the build about to be made at it.
+                        candidate = None;
+                        lock.release();
+                        continue;
+                    }
+                    // Out of static rounds without agreement, the fee still stands if it covers the
+                    // estimate; if it does not, the rounds below settle it over the wire.
+                    settled_statically = estimate <= params.max_fee;
+                }
+
                 // Release the lock immediately as dry run does not submit the transaction
                 // TODO: maybe transfer() should not lock the outputs if it's a dry run
                 lock.release();
+                // A statically settled fee is the figure to report, not the lower one the run turns
+                // out to need: input selection targets `amount + max_fee`, so a submission at
+                // anything other than a fee some build was made at picks a different set of UTXOs
+                // and prices a different transaction. The difference is the estimate's own margin,
+                // single-digit microtari, and it is what buys the settlement in a single round trip.
+                let settled_fee = settled_statically.then_some(params.max_fee);
                 let result = transaction_service
-                    .submit_dry_run_transaction(transaction)
+                    .submit_dry_run_transaction_settled_at(transaction, settled_fee)
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!(
@@ -1381,9 +1427,39 @@ pub async fn handle_stealth_transfer(
                 };
                 rounds += 1;
 
-                match next_fee_estimate_step(params.max_fee, charged, required_fees, candidate.is_some(), rounds) {
+                // The estimator priced under the engine — the one thing `stealth_fee_estimate.rs`
+                // exists to prevent. This round's row records the fee it was built at, which the run
+                // has just shown insufficient, so that row must not become the answer: drop the
+                // static estimate for the rest of the request and let the wire rounds settle, as
+                // they did before there was an estimate.
+                if settled_statically && charged > params.max_fee {
+                    warn!(
+                        target: LOG_TARGET,
+                        "❗️ Static stealth fee estimate came in under the charge (built at {} but cost {charged}); \
+                         settling over the wire",
+                        params.max_fee
+                    );
+                    settle_statically = false;
+                    candidate = None;
+                    params.max_fee = required_fees;
+                    continue;
+                }
+
+                match next_fee_estimate_step(
+                    params.max_fee,
+                    charged,
+                    required_fees,
+                    candidate.is_some() || settled_statically,
+                    rounds,
+                ) {
                     FeeEstimateStep::Settle => {
-                        return Ok(candidate.expect("BUG: Settle is only reached with a candidate"));
+                        // A statically settled fee was confirmed by this very round, so this round's
+                        // response is the one that names it. Otherwise the answer is the round that
+                        // named the fee this one was built at.
+                        if settled_statically {
+                            return Ok(response);
+                        }
+                        return Ok(candidate.expect("BUG: Settle needs a candidate or a static settle"));
                     },
                     FeeEstimateStep::GiveUp => {
                         warn!(
@@ -1392,6 +1468,9 @@ pub async fn handle_stealth_transfer(
                              at {} but cost {charged})",
                             params.max_fee
                         );
+                        // A statically settled round either settles or is diverted above, so this
+                        // response records `required_fees` — a figure above what the round cost —
+                        // rather than a settled fee the run disagreed with.
                         return Ok(response);
                     },
                     FeeEstimateStep::Retry { max_fee } => {
@@ -1426,6 +1505,17 @@ pub async fn handle_stealth_transfer(
     .await?
 }
 
+/// How many times the static estimate may rebuild before giving up and letting the dry-run rounds
+/// settle the fee instead.
+///
+/// Two reach the fixed point in the common case — a build at the caller's fee, then a build at what
+/// that shape prices. The rest is headroom, and a bound on a fixed point that need not exist:
+/// selection is branch-and-bound over the total value selected, so the price of the shape a fee
+/// produces does not move monotonically with that fee, and two fees can each price to the other.
+/// Such a cycle costs the whole allowance of rebuilds — tens of milliseconds of range-proof
+/// generation, still well inside a single round trip — and then settles over the wire as before.
+const MAX_STATIC_SETTLE_ROUNDS: usize = 4;
+
 /// How many times a dry run may build before answering with whatever figure it reached. Three
 /// settle the common case — the caller's guessed fee, the shape that fee produces, and a build at
 /// the figure that shape reported, which confirms it — and the rest is headroom for a selection
@@ -1435,8 +1525,8 @@ const MAX_FEE_ESTIMATE_ROUNDS: usize = 5;
 /// What a dry-run estimation round decides to do next.
 #[derive(Debug, PartialEq, Eq)]
 enum FeeEstimateStep {
-    /// The fee this round was built at covers the shape it produced, so the candidate that named
-    /// that fee is an answer the caller can submit at. Only reached with a candidate in hand.
+    /// The fee this round was built at covers the shape it produced, so the figure that named that
+    /// fee is an answer the caller can submit at.
     Settle,
     /// Build again at this fee.
     Retry { max_fee: u64 },
@@ -1448,17 +1538,18 @@ enum FeeEstimateStep {
 /// produced was `charged`, the `required` figure it reports, whether an earlier round named
 /// `built_at`, and how many rounds have run.
 ///
-/// A round settles only against a candidate: a figure is worth reporting once a build at it has been
-/// shown to cover itself, and the round that shows that is the one after the round that named it.
-/// Without a candidate the fee under test is the caller's guess, which nothing has verified.
+/// A round settles only against a `verified` fee: a figure is worth reporting once a build at it has
+/// been shown to cover itself. A dry-run round shows that for the figure the round before it named,
+/// and the static estimate shows it without a round trip. Unverified, the fee under test is the
+/// caller's guess.
 fn next_fee_estimate_step(
     built_at: u64,
     charged: u64,
     required: u64,
-    has_candidate: bool,
+    verified: bool,
     rounds_taken: usize,
 ) -> FeeEstimateStep {
-    if has_candidate && charged <= built_at {
+    if verified && charged <= built_at {
         return FeeEstimateStep::Settle;
     }
     if rounds_taken >= MAX_FEE_ESTIMATE_ROUNDS {
@@ -1944,9 +2035,10 @@ mod balance_change_handler_tests {
 mod fee_estimate_step_tests {
     use super::*;
 
-    /// The round after the one that named a fee is what shows a build at that fee covers itself.
+    /// A dry-run round shows a fee covers itself for the figure the round before it named; the
+    /// static estimate shows the same thing without a round trip. Either way the fee is verified.
     #[test]
-    fn settles_once_a_named_fee_covers_the_shape_it_produces() {
+    fn settles_once_a_verified_fee_covers_the_shape_it_produces() {
         assert_eq!(
             next_fee_estimate_step(9_000, 9_000, 9_025, true, 2),
             FeeEstimateStep::Settle
@@ -1957,12 +2049,11 @@ mod fee_estimate_step_tests {
         );
     }
 
-    /// The caller's guessed fee has nothing behind it, so a round that covers itself with no
-    /// candidate still has to be built at the figure it reports before that figure can be answered
-    /// with.
+    /// The caller's guessed fee has nothing behind it, so a round that covers itself unverified
+    /// still has to be built at the figure it reports before that figure can be answered with.
     ///
-    /// This delays a cost of zero by one round rather than rejecting it: a second round does hold a
-    /// candidate, and `0 <= built_at`, so it would settle. What keeps a zero out of here is
+    /// This delays a cost of zero by one round rather than rejecting it: a second round is verified,
+    /// and `0 <= built_at`, so it would settle. What keeps a zero out of here is
     /// `FinalizeResult::charged_fees`, which falls back to what the receipt was charged.
     #[test]
     fn does_not_settle_on_the_callers_guess() {
