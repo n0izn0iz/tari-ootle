@@ -3,7 +3,7 @@
 
 use std::{collections::HashSet, iter, path::Path, time::Duration};
 
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use axum_extra::headers::authorization::Bearer;
 use indexmap::{IndexMap, IndexSet};
 use log::*;
@@ -1310,14 +1310,30 @@ pub async fn handle_stealth_transfer(
         // submission will not have. Rebuild at each figure reported until building at it needs no
         // more than it, then answer with the run that named it, which is a figure the caller can
         // submit at.
-        let mut verified_estimate: Option<StealthTransferResponse> = None;
+        let mut candidate: Option<StealthTransferResponse> = None;
         let mut rounds = 0usize;
 
         loop {
-            let (lock, transfer) = sdk
+            let max_fee_this_round = params.max_fee;
+            let build = sdk
                 .stealth_transfer_api()
                 .transfer(owner_account.clone(), params.clone())
-                .await?;
+                .await;
+            // Only an estimate names a round, and only an estimate raises the fee between builds:
+            // a later round widens the selection target to `amount + max_fee`, so it can exhaust an
+            // account that funded the earlier one, and the failure needs to say which fee did it.
+            // The cause is interpolated rather than added as context: `anyhow::Error` renders only
+            // its outermost layer under `{}`, which is what the caller and the log see.
+            let (lock, transfer) = if req.dry_run {
+                build.map_err(|e| {
+                    anyhow!(
+                        "building the transfer at a max fee of {max_fee_this_round} (fee estimate round {}): {e}",
+                        rounds + 1
+                    )
+                })?
+            } else {
+                build?
+            };
 
             let transaction = transfer.transaction;
             let main_pk = transfer.main_signer.public_key().to_byte_type();
@@ -1346,41 +1362,44 @@ pub async fn handle_stealth_transfer(
                 let result = transaction_service
                     .submit_dry_run_transaction(transaction)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Dry run transaction failed: {}", e))?;
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Dry run transaction failed at a max fee of {max_fee_this_round} (fee estimate round {}): \
+                             {e}",
+                            rounds + 1
+                        )
+                    })?;
 
                 let required_fees = result.finalize.required_fees();
                 // What this round's shape actually costs, without the estimate allowance that
                 // `required_fees` carries on top. That allowance is the caller's margin against the
                 // metering drift a wider `max_fee` causes; testing against it here would treat a fee
                 // that pays in full as insufficient and spend another round chasing it.
-                let charged = result.finalize.total_fees_required;
+                let charged = result.finalize.charged_fees();
                 let response = StealthTransferResponse {
                     transaction_id: result.finalize.transaction_hash.into(),
                 };
                 rounds += 1;
 
-                // `verified_estimate` reported the fee this round was built at, so this round is what
-                // establishes that a transaction built at that fee pays for itself.
-                if charged <= params.max_fee &&
-                    let Some(verified) = verified_estimate
-                {
-                    return Ok(verified);
+                match next_fee_estimate_step(params.max_fee, charged, required_fees, candidate.is_some(), rounds) {
+                    FeeEstimateStep::Settle => {
+                        return Ok(candidate.expect("BUG: Settle is only reached with a candidate"));
+                    },
+                    FeeEstimateStep::GiveUp => {
+                        warn!(
+                            target: LOG_TARGET,
+                            "Stealth transfer fee estimate did not settle in {MAX_FEE_ESTIMATE_ROUNDS} rounds (built \
+                             at {} but cost {charged})",
+                            params.max_fee
+                        );
+                        return Ok(response);
+                    },
+                    FeeEstimateStep::Retry { max_fee } => {
+                        params.max_fee = max_fee;
+                        candidate = Some(response);
+                        continue;
+                    },
                 }
-                if rounds >= MAX_FEE_ESTIMATE_ROUNDS {
-                    // Out of rounds: answer with the highest figure reached rather than one nothing
-                    // has been built at, since an estimate below the cost cannot be submitted at all.
-                    warn!(
-                        target: LOG_TARGET,
-                        "Stealth transfer fee estimate did not settle in {MAX_FEE_ESTIMATE_ROUNDS} rounds (a max fee \
-                         of {} was charged {charged})",
-                        params.max_fee
-                    );
-                    return Ok(response);
-                }
-
-                params.max_fee = required_fees;
-                verified_estimate = Some(response);
-                continue;
             }
 
             let tx_id = transaction_service
@@ -1390,7 +1409,7 @@ pub async fn handle_stealth_transfer(
                     Some(lock.id()),
                 )
                 .await
-                .context("Transaction failed to submit")?;
+                .map_err(|e| anyhow!("Transaction failed to submit: {e}"))?;
 
             // Transaction submitted, we're home free, make sure to allow the lock to persist past this call.
             // The wallet will monitor the transaction and release the lock when it's finalized.
@@ -1407,11 +1426,46 @@ pub async fn handle_stealth_transfer(
     .await?
 }
 
-/// How many times a dry run may rebuild at the fee it last reported before answering with whatever
-/// it reached. Two rounds settle the common case — the caller's guessed fee, then the shape that
-/// fee produces — and the third confirms it; the rest is headroom for a selection that keeps
-/// growing.
-const MAX_FEE_ESTIMATE_ROUNDS: usize = 4;
+/// How many times a dry run may build before answering with whatever figure it reached. Three
+/// settle the common case — the caller's guessed fee, the shape that fee produces, and a build at
+/// the figure that shape reported, which confirms it — and the rest is headroom for a selection
+/// that keeps growing as the fee rises.
+const MAX_FEE_ESTIMATE_ROUNDS: usize = 5;
+
+/// What a dry-run estimation round decides to do next.
+#[derive(Debug, PartialEq, Eq)]
+enum FeeEstimateStep {
+    /// The fee this round was built at covers the shape it produced, so the candidate that named
+    /// that fee is an answer the caller can submit at. Only reached with a candidate in hand.
+    Settle,
+    /// Build again at this fee.
+    Retry { max_fee: u64 },
+    /// Out of rounds; answer with what this round reached.
+    GiveUp,
+}
+
+/// Decides what an estimation round leads to, given what the round was `built_at`, what the shape it
+/// produced was `charged`, the `required` figure it reports, whether an earlier round named
+/// `built_at`, and how many rounds have run.
+///
+/// A round settles only against a candidate: a figure is worth reporting once a build at it has been
+/// shown to cover itself, and the round that shows that is the one after the round that named it.
+/// Without a candidate the fee under test is the caller's guess, which nothing has verified.
+fn next_fee_estimate_step(
+    built_at: u64,
+    charged: u64,
+    required: u64,
+    has_candidate: bool,
+    rounds_taken: usize,
+) -> FeeEstimateStep {
+    if has_candidate && charged <= built_at {
+        return FeeEstimateStep::Settle;
+    }
+    if rounds_taken >= MAX_FEE_ESTIMATE_ROUNDS {
+        return FeeEstimateStep::GiveUp;
+    }
+    FeeEstimateStep::Retry { max_fee: required }
+}
 
 #[allow(clippy::too_many_lines)]
 pub async fn handle_create_stealth_transfer_statement(
@@ -1883,6 +1937,73 @@ mod balance_change_handler_tests {
         drop(transaction_service);
         utxo_worker.abort();
         drop(utxo_worker.await);
+    }
+}
+
+#[cfg(test)]
+mod fee_estimate_step_tests {
+    use super::*;
+
+    /// The round after the one that named a fee is what shows a build at that fee covers itself.
+    #[test]
+    fn settles_once_a_named_fee_covers_the_shape_it_produces() {
+        assert_eq!(
+            next_fee_estimate_step(9_000, 9_000, 9_025, true, 2),
+            FeeEstimateStep::Settle
+        );
+        assert_eq!(
+            next_fee_estimate_step(9_000, 8_000, 8_025, true, 2),
+            FeeEstimateStep::Settle
+        );
+    }
+
+    /// The caller's guessed fee has nothing behind it, so a round that covers itself with no
+    /// candidate still has to be built at the figure it reports before that figure can be answered
+    /// with.
+    ///
+    /// This delays a cost of zero by one round rather than rejecting it: a second round does hold a
+    /// candidate, and `0 <= built_at`, so it would settle. What keeps a zero out of here is
+    /// `FinalizeResult::charged_fees`, which falls back to what the receipt was charged.
+    #[test]
+    fn does_not_settle_on_the_callers_guess() {
+        assert_eq!(next_fee_estimate_step(1, 0, 9_354, false, 1), FeeEstimateStep::Retry {
+            max_fee: 9_354
+        });
+    }
+
+    /// A shape that costs more than the fee it was built at is not submittable, so the figure it
+    /// reports becomes the next fee to try.
+    #[test]
+    fn retries_at_the_reported_figure_when_the_shape_costs_more() {
+        assert_eq!(
+            next_fee_estimate_step(9_354, 15_951, 15_976, true, 2),
+            FeeEstimateStep::Retry { max_fee: 15_976 }
+        );
+    }
+
+    /// The cap is a bound on rounds, not a settle condition: the estimate returned is whatever the
+    /// last round reached, which is the highest, since a round only continues while the shape costs
+    /// more than it was built at.
+    #[test]
+    fn gives_up_at_the_round_cap() {
+        assert_eq!(
+            next_fee_estimate_step(15_976, 15_978, 16_003, true, MAX_FEE_ESTIMATE_ROUNDS),
+            FeeEstimateStep::GiveUp
+        );
+        // The cap does not pre-empt a settle that has already been established.
+        assert_eq!(
+            next_fee_estimate_step(15_976, 15_976, 16_001, true, MAX_FEE_ESTIMATE_ROUNDS),
+            FeeEstimateStep::Settle
+        );
+    }
+
+    /// Three builds settle the case this exists for: the caller's guess, the shape it produces, and
+    /// a build at what that shape reported.
+    #[test]
+    fn the_cap_leaves_room_for_the_common_case() {
+        const {
+            assert!(MAX_FEE_ESTIMATE_ROUNDS >= 3);
+        }
     }
 }
 
