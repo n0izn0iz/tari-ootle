@@ -50,7 +50,7 @@ use tari_template_lib::{
         SpendContextInvokeArg,
         VaultInvokeArg,
     },
-    types::{LogLevel, engine_args::SignatureInvokeArg},
+    types::engine_args::SignatureInvokeArg,
 };
 use wasmer::{AsStoreMut, AsStoreRef, Function, FunctionEnv, FunctionEnvMut, Instance, Store, WasmPtr, imports};
 use wasmer_middlewares::metering::{MeteringPoints, get_remaining_points, set_remaining_points};
@@ -227,10 +227,15 @@ impl WasmProcess {
             Some(op) => op,
             None => {
                 log::error!(target: LOG_TARGET, "Invalid opcode: {}", op);
+                env.data_mut()
+                    .set_last_engine_error(WasmExecutionError::InvalidEngineOp { op });
                 return WasmPtr::null();
             },
         };
 
+        // Defence in depth: `max_internal_call_size` sits above what a template can build inside
+        // `WASM_LIMITS.max_memory_pages`, since the argument and its encoded copy must both fit, so
+        // a template reaching this limit runs out of linear memory first.
         if arg_len as usize > limits::ENGINE_LIMITS.max_internal_call_size {
             log::error!(
                 target: LOG_TARGET,
@@ -238,6 +243,11 @@ impl WasmProcess {
                 limits::ENGINE_LIMITS.max_internal_call_size,
                 arg_len
             );
+            env.data_mut()
+                .set_last_engine_error(WasmExecutionError::EngineCallArgSizeExceeded {
+                    limit: limits::ENGINE_LIMITS.max_internal_call_size,
+                    size: arg_len as usize,
+                });
             return WasmPtr::null();
         }
 
@@ -349,19 +359,10 @@ impl WasmProcess {
         };
 
         result.unwrap_or_else(|err| {
-            if let Err(err) = env
-                .data_mut()
-                .state_mut()
-                .interface_mut()
-                .emit_log(LogLevel::Error, format!("Execution error: {}", err))
-            {
-                log::error!(target: LOG_TARGET, "Error emitting log: {}", err);
-            }
-
+            // The recorded error is what reaches the transaction, as its reject reason. This line is
+            // the validator's own record of it.
             log::error!(target: LOG_TARGET, "{}", err);
-            if let WasmExecutionError::RuntimeError(e) = err {
-                env.data_mut().set_last_engine_error(e);
-            }
+            env.data_mut().set_last_engine_error(err);
             WasmPtr::null()
         })
     }
@@ -518,7 +519,7 @@ impl Invokable<Store> for WasmProcess {
         // template is free to ignore that and return normally, so the trap path alone is not enough
         // to catch it.
         if let Some(err) = self.env_mut(store).take_last_engine_error() {
-            return Err(WasmExecutionError::RuntimeError(err));
+            return Err(err);
         }
         // Every site that closes the window drains its own refusal before returning, so this
         // catches only a site that is later added without one.
