@@ -23,6 +23,7 @@
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use config::Config;
+use ootle_byte_type::ToByteType;
 use serde::{Deserialize, Serialize};
 use tari_common::{
     ConfigurationError,
@@ -36,7 +37,7 @@ use tari_ootle_app_utilities::{
     p2p_config::{P2pConfig, PeerSeedsConfig},
 };
 use tari_ootle_transaction::Network;
-use tari_template_lib_types::TemplateAddress;
+use tari_template_lib_types::{TemplateAddress, crypto::RistrettoPublicKeyBytes};
 
 use crate::{network_state_sync::EventFilter, rest_api::RefillRate};
 
@@ -129,6 +130,30 @@ pub struct IndexerConfig {
     /// round trips on hot substates. Requests for a specific version are unaffected.
     #[serde(default = "default_latest_substate_cache_ttl", with = "serializers::seconds")]
     pub latest_substate_cache_ttl: Duration,
+    /// How many epochs past its terminal epoch a transaction submitted through this indexer is
+    /// retained before it is pruned. A transaction's terminal epoch is the epoch it committed in
+    /// once its receipt has been indexed, and its `max_epoch` — the last epoch it could still be
+    /// sequenced in — until then, so a transaction that is never sequenced ages out on the same
+    /// schedule as one that commits. `None` (the default) retains transactions forever, and `0`
+    /// keeps only those that can still commit or committed in the current epoch.
+    ///
+    /// Only the submitted transaction body and its locally recorded rejection reason are pruned;
+    /// transaction receipts synced from the network are retained regardless, so a pruned transaction
+    /// still resolves to its receipt-backed outcome. Set this well above the longest a client may
+    /// take to poll for a result: once pruned, a transaction no longer appears in the
+    /// recent-transactions listing or single transaction lookup, and a mempool rejection reason
+    /// recorded for it is lost. Transactions stored before this indexer recorded a terminal epoch
+    /// carry epoch 0, so the first pass after enabling this prunes that entire backlog.
+    ///
+    /// Pruning bounds database growth but does not return disk to the filesystem: SQLite reuses the
+    /// freed pages rather than shrinking the file.
+    #[serde(default)]
+    pub transaction_retention_epochs: Option<u64>,
+    /// How long the transaction pruner idles between passes once it has nothing left to prune. While
+    /// a backlog remains it drains in back-to-back batches rather than waiting out this interval.
+    /// Only used when `transaction_retention_epochs` is set.
+    #[serde(default = "default_transaction_prune_interval", with = "serializers::seconds")]
+    pub transaction_prune_interval: Duration,
     /// The event filtering configuration
     pub event_filters: Vec<EventFilter>,
     /// Template addresses to watch for component creation/update events.
@@ -154,6 +179,35 @@ fn default_latest_substate_cache_ttl() -> Duration {
     Duration::from_secs(2)
 }
 
+/// The subset of an indexer's configuration that is published over its API, as it affects what
+/// clients see. Built once at startup: the API must expose exactly these values and nothing else
+/// from `IndexerConfig`, which also holds local paths and listen addresses.
+#[derive(Debug, Clone)]
+pub struct PublishedIndexerConfig {
+    pub sidechain_id: Option<RistrettoPublicKeyBytes>,
+    pub transaction_retention_epochs: Option<u64>,
+    pub verify_substate_proofs: bool,
+    pub latest_substate_cache_ttl: Duration,
+    pub indexes_all_events: bool,
+}
+
+impl From<&IndexerConfig> for PublishedIndexerConfig {
+    fn from(config: &IndexerConfig) -> Self {
+        Self {
+            sidechain_id: config.sidechain_id.as_ref().map(|pk| pk.to_byte_type()),
+            transaction_retention_epochs: config.transaction_retention_epochs,
+            verify_substate_proofs: config.verify_substate_proofs,
+            latest_substate_cache_ttl: config.latest_substate_cache_ttl,
+            indexes_all_events: config.event_filters.is_empty() ||
+                config.event_filters.iter().any(EventFilter::is_match_all),
+        }
+    }
+}
+
+fn default_transaction_prune_interval() -> Duration {
+    Duration::from_secs(60 * 60)
+}
+
 fn default_watched_templates() -> Vec<TemplateAddress> {
     vec![tari_template_builtin::LIQUIDITY_POOL_TEMPLATE_ADDRESS]
 }
@@ -176,6 +230,8 @@ impl Default for IndexerConfig {
             sidechain_id: None,
             dry_run_cache_ttl: Duration::from_secs(10),
             latest_substate_cache_ttl: default_latest_substate_cache_ttl(),
+            transaction_retention_epochs: None,
+            transaction_prune_interval: default_transaction_prune_interval(),
             event_filters: vec![],
             watched_templates: default_watched_templates(),
             verify_substate_proofs: default_verify_substate_proofs(),
@@ -233,5 +289,56 @@ impl Default for IndexerRateLimitsConfig {
             sse_max_connections_per_ip: 5,
             trust_proxy_headers: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_event_filters_indexes_every_event() {
+        let config = IndexerConfig::default();
+        assert!(config.event_filters.is_empty());
+        assert!(PublishedIndexerConfig::from(&config).indexes_all_events);
+    }
+
+    /// The shipped config template declares one `[[indexer.event_filters]]` section with no fields,
+    /// which matches every event. That must not read as a filtered indexer.
+    #[test]
+    fn an_empty_filter_indexes_every_event() {
+        let config = IndexerConfig {
+            event_filters: vec![EventFilter::default()],
+            ..Default::default()
+        };
+        assert!(PublishedIndexerConfig::from(&config).indexes_all_events);
+    }
+
+    #[test]
+    fn a_filter_that_narrows_events_is_reported_as_filtered() {
+        let config = IndexerConfig {
+            event_filters: vec![EventFilter {
+                topic: Some("std.vault.deposit".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(!PublishedIndexerConfig::from(&config).indexes_all_events);
+    }
+
+    /// A match-all filter alongside narrower ones still admits everything.
+    #[test]
+    fn a_match_all_filter_wins_over_narrower_ones() {
+        let config = IndexerConfig {
+            event_filters: vec![
+                EventFilter {
+                    topic: Some("std.vault.deposit".into()),
+                    ..Default::default()
+                },
+                EventFilter::default(),
+            ],
+            ..Default::default()
+        };
+        assert!(PublishedIndexerConfig::from(&config).indexes_all_events);
     }
 }

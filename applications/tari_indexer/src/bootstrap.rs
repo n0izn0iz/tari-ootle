@@ -24,6 +24,7 @@ use std::{collections::HashSet, fs, io, str::FromStr, sync::Arc};
 
 use anyhow::{Context, anyhow};
 use libp2p::identity;
+use log::info;
 use ootle_byte_type::ToByteType;
 use tari_base_node_client::grpc::GrpcBaseNodeClient;
 use tari_common::configuration::bootstrap::{ApplicationType, grpc_default_port};
@@ -73,6 +74,7 @@ use crate::{
     IndexerEpochManagerSpec,
     Noop,
     base_layer::verify_correct_network,
+    config::PublishedIndexerConfig,
     dry_run::processor::DryRunTransactionProcessor,
     network_client::TariNetworkClient,
     network_state_sync,
@@ -84,7 +86,10 @@ use crate::{
     substate_manager::SubstateManager,
     template_manager::TemplateManager,
     transaction_manager::TransactionManager,
+    transaction_pruner::TransactionPruner,
 };
+
+const LOG_TARGET: &str = "tari::indexer::bootstrap";
 
 #[allow(clippy::too_many_lines)]
 pub async fn spawn_services(
@@ -284,6 +289,22 @@ pub async fn spawn_services(
         consensus_constants.clone(),
     )?;
 
+    if let Some(retention_epochs) = config.indexer.transaction_retention_epochs {
+        info!(
+            target: LOG_TARGET,
+            "🧹 Pruning transactions more than {} epoch(s) behind, checked every {:.0?}",
+            retention_epochs,
+            config.indexer.transaction_prune_interval,
+        );
+        TransactionPruner::new(
+            store.clone(),
+            epoch_manager.clone(),
+            retention_epochs,
+            config.indexer.transaction_prune_interval,
+        )
+        .spawn(shutdown.clone());
+    }
+
     let transaction_manager = TransactionManager::new(
         network_client.clone(),
         store.clone(),
@@ -296,6 +317,7 @@ pub async fn spawn_services(
     save_identities(config, &keypair)?;
     Ok(Services {
         network: config.network,
+        published_config: PublishedIndexerConfig::from(&config.indexer),
         keypair,
         networking,
         epoch_manager,
@@ -315,6 +337,7 @@ pub async fn spawn_services(
 
 pub struct Services {
     pub network: Network,
+    pub published_config: PublishedIndexerConfig,
     pub keypair: RistrettoKeypair,
     pub networking: NetworkingHandle<TariMessagingSpec>,
     pub epoch_manager: EpochManagerHandle<PeerAddress>,

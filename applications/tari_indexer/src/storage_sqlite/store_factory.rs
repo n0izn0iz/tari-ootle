@@ -156,12 +156,17 @@ fn apply_pragmas(conn: &mut SqliteConnection) -> Result<(), diesel::result::Erro
 #[cfg(test)]
 mod tests {
     use tari_common_types::types::FixedHash;
+    use tari_engine_types::{
+        fees::FeeReceiptBuilder,
+        transaction_receipt::{FinalizeOutcome, TransactionReceipt},
+    };
     use tari_ootle_common_types::{Epoch, NodeHeight, ShardGroup};
+    use tari_ootle_transaction::{Transaction, TransactionId};
 
     use super::*;
     use crate::{
         storage_sqlite::models::VerifiedStateRoot,
-        store::{IndexerStoreReadTransaction, IndexerStoreReader},
+        store::{IndexerStoreReadTransaction, IndexerStoreReader, IndexerStoreWriteTransaction},
     };
 
     fn shard_group() -> ShardGroup {
@@ -379,5 +384,244 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(entry.summary.as_ref().unwrap().total_fees_paid, 123);
+    }
+
+    #[tokio::test]
+    async fn prune_transactions_removes_only_aged_rows_and_keeps_receipts() {
+        let (_dir, store) = temp_store().await;
+
+        // A transaction's retention epoch is its max_epoch until a receipt supplies a commit epoch.
+        let ids = insert_transactions(&store, &[Epoch(5), Epoch(6), Epoch(20)]).await;
+
+        // A receipt for a transaction that is about to be pruned: it must survive.
+        let receipt_address = ids[0].into_receipt_address();
+        store
+            .with_write_tx(move |tx| {
+                tx.batch_insert_transaction_receipts([(receipt_address, receipt_at(Epoch(5)))], &[])
+            })
+            .await
+            .unwrap();
+
+        let num_pruned = store
+            .with_write_tx(move |tx| tx.prune_transactions_before_epoch(Epoch(10), 100))
+            .await
+            .unwrap();
+        assert_eq!(num_pruned, 2);
+
+        let remaining = store
+            .with_read_tx(move |tx| tx.list_recent_transactions(None, 10))
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].transaction_id, ids[2]);
+
+        // The receipt of the pruned transaction is untouched.
+        store
+            .with_read_tx(move |tx| tx.get_transaction_receipt(&receipt_address))
+            .await
+            .unwrap();
+    }
+
+    /// A transaction that never commits gets no receipt — mempool rejection and a consensus abort that
+    /// commits nothing both leave one — so its `max_epoch` stays its retention key. Without that
+    /// fallback these rows, the ones retention exists to bound, would never age out.
+    #[tokio::test]
+    async fn a_transaction_that_never_commits_is_retained_on_its_max_epoch() {
+        let (_dir, store) = temp_store().await;
+
+        let ids = insert_transactions(&store, &[Epoch(5), Epoch(20)]).await;
+        for id in &ids {
+            let id = *id;
+            store
+                .with_write_tx(move |tx| tx.set_transaction_rejected(id, "rejected by mempool validation"))
+                .await
+                .unwrap();
+        }
+
+        let num_pruned = store
+            .with_write_tx(move |tx| tx.prune_transactions_before_epoch(Epoch(10), 100))
+            .await
+            .unwrap();
+        assert_eq!(num_pruned, 1);
+
+        let remaining = store
+            .with_read_tx(move |tx| tx.list_recent_transactions(None, 10))
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].transaction_id, ids[1]);
+    }
+
+    /// A committed transaction is retained from the epoch it committed in, not from the last epoch it
+    /// could have been sequenced in — a wide `max_epoch` must not hold its record open.
+    #[tokio::test]
+    async fn indexing_a_receipt_moves_retention_to_the_commit_epoch() {
+        let (_dir, store) = temp_store().await;
+
+        let ids = insert_transactions(&store, &[Epoch(100)]).await;
+        let receipt_address = ids[0].into_receipt_address();
+
+        // On its max_epoch alone this transaction is far from the cutoff.
+        let num_pruned = store
+            .with_write_tx(move |tx| tx.prune_transactions_before_epoch(Epoch(10), 100))
+            .await
+            .unwrap();
+        assert_eq!(num_pruned, 0);
+
+        store
+            .with_write_tx(move |tx| {
+                tx.batch_insert_transaction_receipts([(receipt_address, receipt_at(Epoch(2)))], &[])
+            })
+            .await
+            .unwrap();
+
+        let num_pruned = store
+            .with_write_tx(move |tx| tx.prune_transactions_before_epoch(Epoch(10), 100))
+            .await
+            .unwrap();
+        assert_eq!(num_pruned, 1);
+    }
+
+    /// The prune select must be servable from `transactions_retention_epoch_idx`. Ordering it by any
+    /// column other than the one it filters on silently degrades it to a full table scan that runs
+    /// under the database-wide write lock, including on the common call that prunes nothing.
+    #[tokio::test]
+    async fn prune_select_is_served_by_the_retention_epoch_index() {
+        #[derive(diesel::QueryableByName)]
+        struct QueryPlanRow {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            detail: String,
+        }
+
+        let (_dir, store) = temp_store().await;
+        let plan = store
+            .with_read_tx(|tx| {
+                sql_query(
+                    "explain query plan select id from transactions where retention_epoch < 100 order by \
+                     retention_epoch asc limit 500",
+                )
+                .load::<QueryPlanRow>(tx.connection())
+                .map_err(|e| StorageError::general("explain query plan", e))
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.detail)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            plan.contains("transactions_retention_epoch_idx"),
+            "prune select does not use the retention epoch index: {plan}"
+        );
+        assert!(
+            !plan.contains("SCAN transactions"),
+            "prune select falls back to a scan: {plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejection_status_distinguishes_a_pruned_row_from_an_unrejected_one() {
+        use tari_common_types::types::PrivateKey;
+        use tari_ootle_transaction::Transaction;
+
+        use crate::store::{IndexerStoreWriteTransaction, TransactionRejectionStatus};
+
+        let (_dir, store) = temp_store().await;
+
+        let transaction = Transaction::builder_localnet(Epoch(1)).build_and_seal(&PrivateKey::from(7u64));
+        let tx_id = transaction.calculate_id();
+
+        // Never submitted here.
+        let status = store
+            .with_read_tx(move |tx| tx.get_transaction_rejection_status(tx_id))
+            .await
+            .unwrap();
+        assert!(matches!(status, TransactionRejectionStatus::NotStored));
+
+        store
+            .with_write_tx(move |tx| tx.insert_or_ignore_transaction(&transaction))
+            .await
+            .unwrap();
+        let status = store
+            .with_read_tx(move |tx| tx.get_transaction_rejection_status(tx_id))
+            .await
+            .unwrap();
+        assert!(matches!(status, TransactionRejectionStatus::NotRejected));
+
+        store
+            .with_write_tx(move |tx| tx.set_transaction_rejected(tx_id, "nope"))
+            .await
+            .unwrap();
+        let status = store
+            .with_read_tx(move |tx| tx.get_transaction_rejection_status(tx_id))
+            .await
+            .unwrap();
+        assert!(matches!(status, TransactionRejectionStatus::Rejected { details, .. } if details == "nope"));
+
+        // Pruned rows report as unstored, so callers do not re-issue the rejection write forever.
+        store
+            .with_write_tx(move |tx| tx.prune_transactions_before_epoch(Epoch(10), 100))
+            .await
+            .unwrap();
+        let status = store
+            .with_read_tx(move |tx| tx.get_transaction_rejection_status(tx_id))
+            .await
+            .unwrap();
+        assert!(matches!(status, TransactionRejectionStatus::NotStored));
+    }
+
+    #[tokio::test]
+    async fn recent_transactions_returns_an_empty_page_when_the_cursor_was_pruned() {
+        use tari_common_types::types::PrivateKey;
+        use tari_ootle_transaction::Transaction;
+
+        use crate::store::IndexerStoreWriteTransaction;
+
+        let (_dir, store) = temp_store().await;
+
+        let transaction = Transaction::builder_localnet(Epoch(1)).build_and_seal(&PrivateKey::from(11u64));
+        let cursor = transaction.calculate_id();
+        store
+            .with_write_tx(move |tx| tx.insert_or_ignore_transaction(&transaction))
+            .await
+            .unwrap();
+
+        store
+            .with_write_tx(move |tx| tx.prune_transactions_before_epoch(Epoch(10), 100))
+            .await
+            .unwrap();
+
+        let page = store
+            .with_read_tx(move |tx| tx.list_recent_transactions(Some(cursor), 10))
+            .await
+            .unwrap();
+        assert!(page.is_empty());
+    }
+    async fn insert_transactions(store: &SqliteIndexerStore, max_epochs: &[Epoch]) -> Vec<TransactionId> {
+        use tari_common_types::types::PrivateKey;
+
+        let mut ids = Vec::new();
+        for (i, max_epoch) in max_epochs.iter().enumerate() {
+            let transaction = Transaction::builder_localnet(*max_epoch).build_and_seal(&PrivateKey::from(i as u64));
+            ids.push(transaction.calculate_id());
+            store
+                .with_write_tx(move |tx| tx.insert_or_ignore_transaction(&transaction))
+                .await
+                .unwrap();
+        }
+        ids
+    }
+
+    fn receipt_at(epoch: Epoch) -> TransactionReceipt {
+        TransactionReceipt {
+            outcome: FinalizeOutcome::FeeIntentCommit,
+            diff_summary: Default::default(),
+            fee_withdrawals: [].into(),
+            events: [].into(),
+            fee_receipt: FeeReceiptBuilder::default().with_total_fees_paid(123).build(),
+            epoch,
+            intent_commitment: Default::default(),
+        }
     }
 }

@@ -33,6 +33,21 @@
 #block_scanning_interval=10
 #state_scanning_interval=60
 
+# How many epochs past its terminal epoch a transaction submitted through this indexer is retained
+# before it is pruned. A transaction's terminal epoch is the epoch it committed in once its receipt has
+# been indexed, and its max_epoch (the last epoch it could still be sequenced in).
+# Unset (the default) retains transactions forever; 0 keeps only those that can still commit or committed
+# in the current epoch (not recommended).
+#
+# Set this well above the longest a client may take to poll for a result — once pruned,
+# a transaction no longer appears in the recent-transactions listing or single
+# transaction lookup.
+#transaction_retention_epochs = 100
+
+# How long, in seconds, the transaction pruner idles between passes once it has nothing left to prune.
+# Only used when transaction_retention_epochs is set. (default = 3600)
+#transaction_prune_interval = 3600
+
 [indexer.p2p]
 #enable_mdns = true
 # Run a rendezvous server on this node so other nodes can use it for peer discovery. This is the SERVER side only - the
