@@ -9,7 +9,14 @@ use std::{
 use indexmap::IndexMap;
 use log::{info, warn};
 use tari_epoch_manager::{EpochManagerError, EpochManagerReader};
-use tari_ootle_common_types::{NodeAddressable, NumPreshards, ShardGroup, SubstateAddress, displayable::Displayable};
+use tari_ootle_common_types::{
+    Epoch,
+    NodeAddressable,
+    NumPreshards,
+    ShardGroup,
+    SubstateAddress,
+    displayable::Displayable,
+};
 use tari_ootle_transaction::{Transaction, TransactionId};
 use tari_rpc_framework::RpcStatusCode;
 use tari_validator_node_rpc::{
@@ -38,6 +45,15 @@ where
             client_provider,
             num_preshards,
         }
+    }
+
+    /// The current epoch, once the epoch manager has completed its initial scan. The scan is waited
+    /// on because until it lands the epoch manager reports zero, and a caller deriving anything
+    /// durable from a zero epoch — a retention key, a validity window — writes a value the node
+    /// will disagree with seconds later.
+    pub async fn current_epoch(&self) -> Result<Epoch, NetworkClientError> {
+        self.epoch_manager.wait_for_initial_scanning_to_complete().await?;
+        Ok(self.epoch_manager.current_epoch().await?)
     }
 
     pub async fn submit_transaction(&self, transaction: Transaction) -> Result<TransactionId, NetworkClientError> {

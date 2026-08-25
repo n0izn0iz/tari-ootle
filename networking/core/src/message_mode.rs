@@ -358,10 +358,18 @@ pub enum MessagingMode<TMsg: MessageSpec> {
         tx_messages: MessageQueueSender<TMsg::Message>,
         tx_gossip_messages_by_topic: HashMap<String, GossipQueueSender>,
     },
+    /// Gossip topics are consumed, but the direct messaging protocol is not negotiated with peers.
+    /// For a node that takes part in gossip meshes without being addressable for point-to-point
+    /// messages.
+    GossipOnly {
+        tx_gossip_messages_by_topic: HashMap<String, GossipQueueSender>,
+    },
     Disabled,
 }
 
 impl<TMsg: MessageSpec> MessagingMode<TMsg> {
+    /// Whether the direct messaging protocol should be negotiated. Gossip is carried by gossipsub
+    /// regardless, so this is false under [`MessagingMode::GossipOnly`].
     pub fn is_enabled(&self) -> bool {
         matches!(self, MessagingMode::Enabled { .. })
     }
@@ -378,23 +386,31 @@ impl<TMsg: MessageSpec> MessagingMode<TMsg> {
     }
 
     pub fn send_gossip_message(&self, msg: GossipMessage) -> Result<(), GossipSendError> {
-        if let MessagingMode::Enabled {
-            tx_gossip_messages_by_topic,
-            ..
-        } = self
-        {
-            // Topics may be a bare prefix (single global topic, e.g. "consensus") or a prefixed topic
-            // (e.g. "transactions-0-15"). Route on the prefix before the first delimiter, falling back to the
-            // whole topic when there is no delimiter.
-            let queue = {
-                let topic = msg.message.topic.as_str();
-                let prefix = topic.split_once(TOPIC_DELIMITER).map_or(topic, |(prefix, _)| prefix);
-                tx_gossip_messages_by_topic
-                    .get(prefix)
-                    .ok_or_else(|| GossipSendError::InvalidToken(topic.to_string()))?
-            };
-            queue.try_send(msg)?;
-        }
+        let queues = match self {
+            MessagingMode::Enabled {
+                tx_gossip_messages_by_topic,
+                ..
+            } |
+            MessagingMode::GossipOnly {
+                tx_gossip_messages_by_topic,
+            } => tx_gossip_messages_by_topic,
+            // The worker turns this error into an `Ignore` verdict. Without it a subscribed topic
+            // whose messages nobody consumes leaves every message pinned in gossipsub's validation
+            // cache, never propagated and never released.
+            MessagingMode::Disabled => return Err(GossipSendError::InvalidToken(msg.message.topic.to_string())),
+        };
+
+        // Topics may be a bare prefix (single global topic, e.g. "consensus") or a prefixed topic
+        // (e.g. "transactions-0-15"). Route on the prefix before the first delimiter, falling back to the
+        // whole topic when there is no delimiter.
+        let queue = {
+            let topic = msg.message.topic.as_str();
+            let prefix = topic.split_once(TOPIC_DELIMITER).map_or(topic, |(prefix, _)| prefix);
+            queues
+                .get(prefix)
+                .ok_or_else(|| GossipSendError::InvalidToken(topic.to_string()))?
+        };
+        queue.try_send(msg)?;
         Ok(())
     }
 }
