@@ -68,6 +68,7 @@ use tari_ootle_app_utilities::{
     fee_tables::get_fee_table_by_network,
     identity_management,
     keypair::RistrettoKeypair,
+    protocol_activation::check_and_record_activation_schedule,
     seed_peer::SeedPeer,
     shared_consts::TXTR_FAUCET_INITIAL_SUPPLY,
 };
@@ -206,6 +207,12 @@ pub async fn spawn_services(
         hack_xtr_initial_supply(&store).await?;
     }
 
+    check_and_record_activation_schedule(
+        config.network,
+        &global_db,
+        config.indexer.allow_past_protocol_activation,
+    )?;
+
     // Epoch event oracle
     let epoch_event_oracle = create_epoch_oracle(config, global_db.clone(), &consensus_constants).await?;
 
@@ -252,6 +259,7 @@ pub async fn spawn_services(
     let substate_versions = Arc::new(SubstateVersionTracker::new());
 
     network_state_sync::NetworkWideStateSync::new(
+        config.network,
         epoch_manager.clone(),
         networking.clone(),
         store.clone(),
@@ -275,6 +283,7 @@ pub async fn spawn_services(
     let substate_cache_dir = config.to_data_dir().join("substate_cache");
     let substate_cache = SubstateFileCache::new(substate_cache_dir).context("Failed to create substate cache")?;
     let substate_manager = SubstateManager::new(
+        config.network,
         store.clone(),
         epoch_manager.clone(),
         validator_node_client_factory.clone(),
@@ -317,6 +326,7 @@ pub async fn spawn_services(
         .with_substate_proof_verification(false);
     let fee_table = get_fee_table_by_network(config.network);
     let dry_run_transaction_processor = DryRunTransactionProcessor::new(
+        config.network,
         fee_table.clone(),
         epoch_manager.clone(),
         dry_run_substate_manager,

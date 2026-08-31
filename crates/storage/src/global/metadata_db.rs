@@ -57,6 +57,9 @@ pub enum MetadataKey {
     EpochManagerHighestLockedEpoch,
     /// The "birthday" epoch of the network
     EpochManagerBirthdayEpoch,
+    /// The schema activation schedule the node last started with. Compared against the running
+    /// binary's schedule to detect a disagreement about activations the node has already passed.
+    ProtocolActivationSchedule,
 }
 
 impl MetadataKey {
@@ -69,6 +72,7 @@ impl MetadataKey {
             Self::EpochManagerLastEpochHash => b"epoch_manager.last_epoch_hash",
             Self::EpochManagerHighestLockedEpoch => b"epoch_manager.highest_locked_epoch",
             Self::EpochManagerBirthdayEpoch => b"epoch_manager.birthday_epoch",
+            Self::ProtocolActivationSchedule => b"protocol.activation_schedule",
         }
     }
 }

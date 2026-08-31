@@ -49,7 +49,7 @@ use tari_consensus::consensus_constants::ConsensusConstants;
 use tari_engine_types::crypto::{MAX_LAZY_BP_AGG_FACTORS, get_commitment_factory, get_static_range_proof_service};
 use tari_epoch_manager::traits::EpochManagerSpec;
 use tari_epoch_oracles::EpochOracle;
-use tari_ootle_app_utilities::keypair::RistrettoKeypair;
+use tari_ootle_app_utilities::{keypair::RistrettoKeypair, protocol_activation::check_and_record_activation_schedule};
 use tari_ootle_common_types::SubstateAddress;
 use tari_ootle_p2p::PeerAddress;
 use tari_ootle_storage::global::{DbFactory, GlobalDb};
@@ -104,6 +104,12 @@ pub async fn run_validator_node(
     let global_db = db_factory
         .get_or_create_global_db()
         .map_err(|e| ExitError::new(ExitCode::DatabaseError, e))?;
+
+    check_and_record_activation_schedule(
+        config.network,
+        &global_db,
+        config.validator_node.allow_past_protocol_activation,
+    )?;
 
     info!(
         target: LOG_TARGET,
