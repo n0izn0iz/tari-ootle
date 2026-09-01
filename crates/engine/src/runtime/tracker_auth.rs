@@ -270,6 +270,12 @@ fn check_requirement<TStore: StateReader>(
 
             Ok(false)
         },
+        // `caller` is `None` in two cases:
+        // 1. resource/ownership checks — the current frame is the caller, so the fallback is correct;
+        // 2. a top-level transaction calls the method directly — the caller is just the signer, with no
+        //    component/template identity to match.
+        // For case 2 the fallback resolves to the callee, so a rule gated on its own address
+        // (`component(own_address)`) or template (`template(own_template)`) still matches a direct signer call.
         RuleRequirement::ScopedToComponent(address) => match caller {
             Some(caller) => Ok(caller.component == Some(*address)),
             None => Ok(state.current_component()? == Some(*address)),
