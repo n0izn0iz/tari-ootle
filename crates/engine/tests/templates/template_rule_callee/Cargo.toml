@@ -1,6 +1,6 @@
 [workspace]
 [package]
-name = "repro_callee"
+name = "template_rule_callee"
 version = "0.1.0"
 edition = "2024"
 

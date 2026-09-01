@@ -7,24 +7,17 @@ use tari_template_test_tooling::TemplateTest;
 
 const CRATE_PATH: &str = env!("CARGO_MANIFEST_DIR");
 
-/// Regression test for the `template(addr)` access-rule bug on *component method* rules.
+/// A `rule!(template(addr))` method access rule allows callers from the template whose address is
+/// `addr`, whether they are a component instance of that template or a static function of it.
 ///
-/// The callee's `bar` method is configured with `rule!(template(caller_template))`, documented as
-/// "only callable from this template". We perform the call from two kinds of callers, both belonging to
-/// `caller_template`:
-///
-/// 1. a **component** of that template (`TemplateCaller::call_bar`), and
-/// 2. a **static function** of that template (`TemplateCaller::call_bar_static`).
-///
-/// Per the engine implementation both are currently *denied*: the `ScopedToTemplate` rule is compared against
-/// the callee's own template (the top call frame), never the caller's. Both tests assert the documented behavior
-/// (the caller is allowed), so they currently FAIL and should pass once the engine evaluates the rule against the
-/// caller.
+/// The callee's `bar` method is gated with `rule!(template(caller_template))`. These tests invoke
+/// `bar` from (1) a component of the caller template and (2) a static function of the caller
+/// template, and assert both succeed.
 #[test]
-fn template_rule_on_method_is_checked_against_the_callee_not_the_caller() {
+fn template_rule_on_method_allows_a_component_caller() {
     let mut test = TemplateTest::new(CRATE_PATH, [
-        "tests/templates/repro_template_caller",
-        "tests/templates/repro_template_callee",
+        "tests/templates/template_rule_caller",
+        "tests/templates/template_rule_callee",
     ]);
 
     // Create the caller component, then the callee gated on the caller's *template* address.
@@ -38,8 +31,7 @@ fn template_rule_on_method_is_checked_against_the_callee_not_the_caller() {
     let cross_ping: u64 = test.call_method(caller, "call_ping", args![callee], vec![test.owner_proof()]);
     assert_eq!(cross_ping, 42);
 
-    // Expected: a component of `caller_template` is allowed.
-    // Currently fails: the engine compares the rule against the callee, not the caller.
+    // A component of `caller_template` is allowed.
     test.execute_expect_success(
         test.transaction()
             .call_method(caller, "call_bar", args![callee])
@@ -49,10 +41,10 @@ fn template_rule_on_method_is_checked_against_the_callee_not_the_caller() {
 }
 
 #[test]
-fn template_rule_on_method_from_static_function_is_checked_against_the_callee_not_the_caller() {
+fn template_rule_on_method_allows_a_static_function_caller() {
     let mut test = TemplateTest::new(CRATE_PATH, [
-        "tests/templates/repro_template_caller",
-        "tests/templates/repro_template_callee",
+        "tests/templates/template_rule_caller",
+        "tests/templates/template_rule_callee",
     ]);
 
     // Gate the callee's `bar` on the caller's *template* address.
@@ -67,8 +59,7 @@ fn template_rule_on_method_from_static_function_is_checked_against_the_callee_no
     ]);
     assert_eq!(cross_ping, 42);
 
-    // Expected: a static function of `caller_template` is allowed (its template matches the gate).
-    // Currently fails: the engine compares the rule against the callee, not the caller.
+    // A static function of `caller_template` is allowed (its template matches the gate).
     test.execute_expect_success(
         test.transaction()
             .call_function(caller_template, "call_bar_static", args![callee])
