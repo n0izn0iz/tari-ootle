@@ -22,23 +22,17 @@ const CRATE_PATH: &str = env!("CARGO_MANIFEST_DIR");
 /// caller.
 #[test]
 fn template_rule_on_method_is_checked_against_the_callee_not_the_caller() {
-    let mut test = TemplateTest::new(
-        CRATE_PATH,
-        [
-            "tests/templates/repro_template_caller",
-            "tests/templates/repro_template_callee",
-        ],
-    );
+    let mut test = TemplateTest::new(CRATE_PATH, [
+        "tests/templates/repro_template_caller",
+        "tests/templates/repro_template_callee",
+    ]);
 
     // Create the caller component, then the callee gated on the caller's *template* address.
     let caller: ComponentAddress = test.call_function("TemplateCaller", "new", args![], vec![test.owner_proof()]);
     let caller_template: TemplateAddress = test.get_template_address("TemplateCaller");
-    let callee: ComponentAddress = test.call_function(
-        "TemplateCallee",
-        "new",
-        args![caller_template],
-        vec![test.owner_proof()],
-    );
+    let callee: ComponentAddress = test.call_function("TemplateCallee", "new", args![caller_template], vec![
+        test.owner_proof(),
+    ]);
 
     // Control: the caller component can invoke the callee's unrestricted method cross-component.
     let cross_ping: u64 = test.call_method(caller, "call_ping", args![callee], vec![test.owner_proof()]);
@@ -56,30 +50,21 @@ fn template_rule_on_method_is_checked_against_the_callee_not_the_caller() {
 
 #[test]
 fn template_rule_on_method_from_static_function_is_checked_against_the_callee_not_the_caller() {
-    let mut test = TemplateTest::new(
-        CRATE_PATH,
-        [
-            "tests/templates/repro_template_caller",
-            "tests/templates/repro_template_callee",
-        ],
-    );
+    let mut test = TemplateTest::new(CRATE_PATH, [
+        "tests/templates/repro_template_caller",
+        "tests/templates/repro_template_callee",
+    ]);
 
     // Gate the callee's `bar` on the caller's *template* address.
     let caller_template: TemplateAddress = test.get_template_address("TemplateCaller");
-    let callee: ComponentAddress = test.call_function(
-        "TemplateCallee",
-        "new",
-        args![caller_template],
-        vec![test.owner_proof()],
-    );
+    let callee: ComponentAddress = test.call_function("TemplateCallee", "new", args![caller_template], vec![
+        test.owner_proof(),
+    ]);
 
     // Control: a static function of `caller_template` can invoke the callee's unrestricted method.
-    let cross_ping: u64 = test.call_function(
-        "TemplateCaller",
-        "call_ping_static",
-        args![callee],
-        vec![test.owner_proof()],
-    );
+    let cross_ping: u64 = test.call_function("TemplateCaller", "call_ping_static", args![callee], vec![
+        test.owner_proof(),
+    ]);
     assert_eq!(cross_ping, 42);
 
     // Expected: a static function of `caller_template` is allowed (its template matches the gate).

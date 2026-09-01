@@ -175,6 +175,15 @@ pub(super) struct WorkingState<TStore> {
     confidential_totals: ConfidentialTransactionTotals,
 }
 
+/// The caller identity of a component method access check: the component and/or template that was
+/// current immediately before the callee's frame was pushed. `None` when the method is invoked
+/// directly from a top-level transaction instruction (no caller frame).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MethodCaller {
+    pub component: Option<ComponentAddress>,
+    pub template: Option<TemplateAddress>,
+}
+
 impl<TStore: StateReader> WorkingState<TStore> {
     pub fn new(
         state_store: TStore,
@@ -1491,6 +1500,25 @@ impl<TStore: StateReader> WorkingState<TStore> {
             .scope()
             .get_current_component_lock()
             .and_then(|lock| lock.substate_id().as_component_address()))
+    }
+
+    /// Returns the caller of the current component method, i.e. the component/template that was
+    /// current immediately before the callee's frame was pushed. `None` when the method is invoked
+    /// directly from a top-level transaction instruction (no caller frame).
+    pub fn method_caller(&self) -> Result<Option<MethodCaller>, RuntimeError> {
+        if self.call_frames.len() < 2 {
+            return Ok(None);
+        }
+        let caller = &self.call_frames[self.call_frames.len() - 2];
+        let component = caller
+            .scope()
+            .get_current_component_lock()
+            .and_then(|lock| lock.substate_id().as_component_address());
+        let template = *caller.current_template();
+        Ok(Some(MethodCaller {
+            component,
+            template: Some(template),
+        }))
     }
 
     pub fn get_auth_caller(&self) -> Result<AuthHookCaller, RuntimeError> {

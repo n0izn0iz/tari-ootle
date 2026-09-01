@@ -16,7 +16,12 @@ use tari_template_lib::types::{
 };
 
 use crate::{
-    runtime::{ActionIdent, AuthorizationScope, RuntimeError, working_state::WorkingState},
+    runtime::{
+        ActionIdent,
+        AuthorizationScope,
+        RuntimeError,
+        working_state::{MethodCaller, WorkingState},
+    },
     state_store::StateReader,
 };
 
@@ -54,9 +59,12 @@ impl<'a, TStore: StateReader> Authorization<'a, TStore> {
                     details: format!("Expected a component address, got {}", locked.substate_id()),
                 })?;
 
-        // Check access rules
+        // Method access rules are evaluated against the caller, not the callee frame that is already on
+        // top of the stack: `rule!(component(addr))` / `rule!(template(addr))` mean "callable from this
+        // component/template".
         let access_rule = component.access_rules().get_method_access_rule(method);
-        if !self.check_access_rule(access_rule)? {
+        let caller = self.state.method_caller()?;
+        if !check_access_rule(self.state, scope, access_rule, caller)? {
             return Err(RuntimeError::AccessDenied {
                 action_ident: ActionIdent::ComponentCallMethod {
                     component_address,
@@ -83,7 +91,7 @@ impl<'a, TStore: StateReader> Authorization<'a, TStore> {
         }
 
         let rule = resource_access_rules.get_access_rule(&action);
-        if !check_access_rule(self.state, scope, rule)? {
+        if !check_access_rule(self.state, scope, rule, None)? {
             return Err(RuntimeError::AccessDenied {
                 action_ident: action.into(),
             });
@@ -94,7 +102,7 @@ impl<'a, TStore: StateReader> Authorization<'a, TStore> {
 
     pub fn check_access_rule(&self, rule: &AccessRule) -> Result<bool, RuntimeError> {
         let scope = self.state.current_call_scope()?.auth_scope();
-        check_access_rule(self.state, scope, rule)
+        check_access_rule(self.state, scope, rule, None)
     }
 
     /// Returns `true` if the current call scope satisfies the given ownership rule.
@@ -122,7 +130,7 @@ fn check_ownership<TStore: StateReader>(
 ) -> Result<bool, RuntimeError> {
     match ownership.owner_rule.as_ref() {
         SubstateOwnerRule::None => Ok(false),
-        SubstateOwnerRule::ByAccessRule(rule) => check_access_rule(state, scope, rule),
+        SubstateOwnerRule::ByAccessRule(rule) => check_access_rule(state, scope, rule, None),
         SubstateOwnerRule::ByPublicKey(key) => {
             let owner_proof = NonFungibleAddress::from_public_key(*key);
             Ok(scope.contains_badge(&owner_proof))
@@ -134,11 +142,12 @@ fn check_access_rule<TStore: StateReader>(
     state: &WorkingState<TStore>,
     scope: &AuthorizationScope,
     rule: &AccessRule,
+    caller: Option<MethodCaller>,
 ) -> Result<bool, RuntimeError> {
     match rule {
         AccessRule::AllowAll => Ok(true),
         AccessRule::DenyAll => Ok(false),
-        AccessRule::Restricted(rule) => check_restricted_access_rule(state, scope, rule),
+        AccessRule::Restricted(rule) => check_restricted_access_rule(state, scope, rule, caller),
     }
 }
 
@@ -146,12 +155,13 @@ fn check_restricted_access_rule<TStore: StateReader>(
     state: &WorkingState<TStore>,
     scope: &AuthorizationScope,
     rule: &RestrictedAccessRule,
+    caller: Option<MethodCaller>,
 ) -> Result<bool, RuntimeError> {
     match rule {
-        RestrictedAccessRule::Require(rule) => check_require_rule(state, scope, rule),
+        RestrictedAccessRule::Require(rule) => check_require_rule(state, scope, rule, caller),
         RestrictedAccessRule::AnyOf(rules) => {
             for rule in rules {
-                if check_restricted_access_rule(state, scope, rule)? {
+                if check_restricted_access_rule(state, scope, rule, caller)? {
                     return Ok(true);
                 }
             }
@@ -163,7 +173,7 @@ fn check_restricted_access_rule<TStore: StateReader>(
                 return Ok(false);
             }
             for rule in rules {
-                if !check_restricted_access_rule(state, scope, rule)? {
+                if !check_restricted_access_rule(state, scope, rule, caller)? {
                     return Ok(false);
                 }
             }
@@ -176,12 +186,13 @@ fn check_require_rule<TStore: StateReader>(
     state: &WorkingState<TStore>,
     scope: &AuthorizationScope,
     rule: &RequireRule,
+    caller: Option<MethodCaller>,
 ) -> Result<bool, RuntimeError> {
     match rule {
-        RequireRule::Require(requirement) => check_requirement(state, scope, requirement),
+        RequireRule::Require(requirement) => check_requirement(state, scope, requirement, caller),
         RequireRule::AnyOf(requirements) => {
             for requirement in requirements {
-                if check_requirement(state, scope, requirement)? {
+                if check_requirement(state, scope, requirement, caller)? {
                     return Ok(true);
                 }
             }
@@ -194,7 +205,7 @@ fn check_require_rule<TStore: StateReader>(
                 return Ok(false);
             }
             for requirement in requirements {
-                if !check_requirement(state, scope, requirement)? {
+                if !check_requirement(state, scope, requirement, caller)? {
                     return Ok(false);
                 }
             }
@@ -208,7 +219,7 @@ fn check_require_rule<TStore: StateReader>(
             }
             let mut satisfied = 0u16;
             for requirement in requirements {
-                if check_requirement(state, scope, requirement)? {
+                if check_requirement(state, scope, requirement, caller)? {
                     satisfied += 1;
                     if satisfied == *n {
                         return Ok(true);
@@ -225,6 +236,7 @@ fn check_requirement<TStore: StateReader>(
     state: &WorkingState<TStore>,
     scope: &AuthorizationScope,
     requirement: &RuleRequirement,
+    caller: Option<MethodCaller>,
 ) -> Result<bool, RuntimeError> {
     match requirement {
         RuleRequirement::Resource(resx) => {
@@ -258,10 +270,16 @@ fn check_requirement<TStore: StateReader>(
 
             Ok(false)
         },
-        RuleRequirement::ScopedToComponent(address) => Ok(state.current_component()? == Some(*address)),
-        RuleRequirement::ScopedToTemplate(address) => {
-            let current = state.current_template()?;
-            Ok(current == address)
+        RuleRequirement::ScopedToComponent(address) => match caller {
+            Some(caller) => Ok(caller.component == Some(*address)),
+            None => Ok(state.current_component()? == Some(*address)),
+        },
+        RuleRequirement::ScopedToTemplate(address) => match caller {
+            Some(caller) => Ok(caller.template == Some(*address)),
+            None => {
+                let current = state.current_template()?;
+                Ok(current == address)
+            },
         },
     }
 }

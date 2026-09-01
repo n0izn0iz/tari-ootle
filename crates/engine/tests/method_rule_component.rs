@@ -18,10 +18,10 @@ const CRATE_PATH: &str = env!("CARGO_MANIFEST_DIR");
 /// pass once the engine evaluates the rule against the caller.
 #[test]
 fn component_rule_on_method_is_checked_against_the_callee_not_the_caller() {
-    let mut test = TemplateTest::new(
-        CRATE_PATH,
-        ["tests/templates/repro_caller", "tests/templates/repro_callee"],
-    );
+    let mut test = TemplateTest::new(CRATE_PATH, [
+        "tests/templates/repro_caller",
+        "tests/templates/repro_callee",
+    ]);
 
     // Create the caller component, then the callee gated on the caller's address.
     let caller: ComponentAddress = test.call_function("Caller", "new", args![], vec![test.owner_proof()]);
