@@ -178,9 +178,23 @@ fn calculate_substate_changes<
 >(
     store: &mut S,
     current_version: Option<Version>,
-    version: Version,
+    next_version: Version,
     changes: I,
 ) -> Result<(TreeHash, TreeUpdateBatch<StateTreePayload>), StateTreeError> {
+    // JMT nodes are keyed by (version, nibble_path). Writing a version that is not strictly ahead of
+    // the base version overwrites live nodes with keys that this same write records as stale, so the
+    // stale-node GC later deletes nodes the current tree still points at. Callers that stage changes
+    // and write them later are additionally guarded at the write funnel, in
+    // `ShardScopedTreeStoreWriter::set_state_version`.
+    if let Some(current_version) = current_version &&
+        next_version <= current_version
+    {
+        return Err(StateTreeError::NonMonotonicVersion {
+            current_version,
+            next_version,
+        });
+    }
+
     let jmt = JellyfishMerkleTree::new(store);
 
     let changes = changes.into_iter().map(|ch| match ch {
@@ -191,7 +205,7 @@ fn calculate_substate_changes<
         SubstateTreeChange::Down { id } => (M::map_to_leaf_key(&id), None),
     });
 
-    let (root_hash, update_result) = jmt.batch_put_value_set(changes, None, current_version, version)?;
+    let (root_hash, update_result) = jmt.batch_put_value_set(changes, None, current_version, next_version)?;
 
     Ok((root_hash, update_result))
 }
