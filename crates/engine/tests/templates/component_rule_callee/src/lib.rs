@@ -20,6 +20,22 @@ mod callee {
                 .create()
         }
 
+        pub fn new_self_gated() -> Component<Self> {
+            // Allocate the address first so it can gate the component's own method.
+            let allocation = CallerContext::allocate_component_address(None);
+            let own_address = allocation.get_address();
+            let access_rules = ComponentAccessRules::new()
+                .method("bar", rule!(component(own_address)))
+                .method("ping", rule!(allow_all))
+                .default(rule!(deny_all));
+
+            Component::new(Callee)
+                .with_address_allocation(allocation)
+                .with_access_rules(access_rules)
+                .with_owner_rule(OwnerRule::None)
+                .create()
+        }
+
         pub fn bar(&self) {}
 
         pub fn ping(&self) -> u64 {

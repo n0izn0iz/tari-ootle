@@ -1,9 +1,10 @@
 //   Copyright 2026 The Tari Project
 //   SPDX-License-Identifier: BSD-3-Clause
 
+use tari_engine::runtime::{ActionIdent, RuntimeError};
 use tari_ootle_transaction::args;
 use tari_template_lib::types::{ComponentAddress, TemplateAddress};
-use tari_template_test_tooling::TemplateTest;
+use tari_template_test_tooling::{TemplateTest, support::assert_error::assert_reject_reason};
 
 const CRATE_PATH: &str = env!("CARGO_MANIFEST_DIR");
 
@@ -40,6 +41,7 @@ fn template_rule_on_method_allows_a_component_caller() {
     );
 }
 
+/// A static function of the gated template is allowed (its template matches the gate).
 #[test]
 fn template_rule_on_method_allows_a_static_function_caller() {
     let mut test = TemplateTest::new(CRATE_PATH, [
@@ -66,4 +68,35 @@ fn template_rule_on_method_allows_a_static_function_caller() {
             .build_and_seal(test.secret_key()),
         vec![test.owner_proof()],
     );
+}
+
+/// A caller from a different template must be denied.
+#[test]
+fn template_rule_on_method_denies_a_component_of_another_template() {
+    let mut test = TemplateTest::new(CRATE_PATH, [
+        "tests/templates/component_rule_caller",
+        "tests/templates/template_rule_caller",
+        "tests/templates/template_rule_callee",
+    ]);
+
+    // The callee's `bar` is gated on the `TemplateCaller` template.
+    let caller_template: TemplateAddress = test.get_template_address("TemplateCaller");
+    let callee: ComponentAddress = test.call_function("TemplateCallee", "new", args![caller_template], vec![
+        test.owner_proof(),
+    ]);
+
+    // `Caller` belongs to a different template, so it must be denied.
+    let intruder: ComponentAddress = test.call_function("Caller", "new", args![], vec![test.owner_proof()]);
+    let reason = test.execute_expect_failure(
+        test.transaction()
+            .call_method(intruder, "call_bar", args![callee])
+            .build_and_seal(test.secret_key()),
+        vec![test.owner_proof()],
+    );
+    assert_reject_reason(reason, RuntimeError::AccessDenied {
+        action_ident: ActionIdent::ComponentCallMethod {
+            component_address: callee,
+            method: "bar".to_string(),
+        },
+    });
 }
