@@ -911,6 +911,12 @@ mod resource_access_rules {
         );
     }
 
+    // NOTE: there is no regression test yet for the auth-hook caller-identity transfer. When a
+    // resource action triggers a hook via `invoke_resource_access_hook`, the hook's method observes
+    // the acting component as its caller (the acting component's frame is still on top when the hook
+    // frame is pushed), which makes `caller_component`/`caller_template` usable in the hook path. A
+    // test would need an external actor component acting on an attacker-authored resource, since the
+    // hook is skipped when a component acts on its own resource.
     #[test]
     fn it_allows_resource_actions_if_auth_hook_passes() {
         let mut test = TemplateTest::new(CRATE_PATH, ["tests/templates/access_rules"]);
