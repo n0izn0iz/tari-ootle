@@ -176,12 +176,19 @@ pub enum RuleRequirement {
     /// Requires a proof of a specific non-fungible token
     #[n(1)]
     NonFungibleAddress(#[n(0)] NonFungibleAddress),
-    /// Requires execution within a specific component
+    /// Requires execution within a specific component (the current frame is that component)
     #[n(2)]
     ScopedToComponent(#[n(0)] ComponentAddress),
-    /// Requires execution within a specific template
+    /// Requires execution within a specific template (the current frame is that template)
     #[n(3)]
     ScopedToTemplate(#[n(0)] TemplateAddress),
+    /// Requires a call from a specific component: the caller of a component method is that component
+    #[n(4)]
+    CallerComponent(#[n(0)] ComponentAddress),
+    /// Requires a call from a specific template: the caller of a component method belongs to that
+    /// template (whether a component instance or a static function)
+    #[n(5)]
+    CallerTemplate(#[n(0)] TemplateAddress),
 }
 
 impl From<ResourceAddress> for RuleRequirement {
@@ -574,6 +581,10 @@ impl Default for ResourceAccessRules {
 /// It allows for defining rules such as `allow_all`, `deny_all`, and more complex rules using `any_of`, `all_of` and
 /// `n_of` constructs.
 ///
+/// `component(addr)` / `template(addr)` require execution within a component/template, while
+/// `caller_component(addr)` / `caller_template(addr)` require a call from that component/template and are intended for
+/// component method access rules.
+///
 /// # Examples:
 ///
 /// ```rust
@@ -595,6 +606,10 @@ impl Default for ResourceAccessRules {
 /// // Restricted access to a template
 /// let template_address = tari_template_lib_types::TemplateAddress::default();
 /// let template_rule = rule!(template(template_address));
+/// // Restricted access to calls from a specific component (component method rules)
+/// let caller_component_rule = rule!(caller_component(component_address));
+/// // Restricted access to calls from a specific template (component method rules)
+/// let caller_template_rule = rule!(caller_template(template_address));
 /// // Restricted access to a non-fungible token
 /// let non_fungible_address = tari_template_lib_types::NonFungibleAddress::from_public_key(
 ///     tari_template_lib_types::crypto::RistrettoPublicKeyBytes::default(),
@@ -667,6 +682,12 @@ macro_rules! __rule_requirement {
     };
     (template($x: expr)) => {
         $crate::access_rules::RuleRequirement::ScopedToTemplate($x)
+    };
+    (caller_component($x: expr)) => {
+        $crate::access_rules::RuleRequirement::CallerComponent($x)
+    };
+    (caller_template($x: expr)) => {
+        $crate::access_rules::RuleRequirement::CallerTemplate($x)
     };
 }
 
