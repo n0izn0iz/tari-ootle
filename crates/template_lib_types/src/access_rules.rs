@@ -585,6 +585,10 @@ impl Default for ResourceAccessRules {
 /// `caller_component(addr)` / `caller_template(addr)` require a call from that component/template and are intended for
 /// component method access rules.
 ///
+/// **Caution:** `caller_component` / `caller_template` match the immediate caller's identity, which is only as
+/// trustworthy as the code that makes the call. A method that forwards a caller-supplied component and method (a
+/// "proxy" method) delegates that identity, so anyone who can call the proxy can act as the proxied component/template.
+///
 /// # Examples:
 ///
 /// ```rust
