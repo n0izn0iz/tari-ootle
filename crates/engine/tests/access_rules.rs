@@ -21,6 +21,7 @@ use tari_template_lib::{
             ResourceAccessRules,
             ResourceAuthAction,
             RestrictedAccessRule,
+            RuleRequirement,
         },
         rule,
     },
@@ -221,6 +222,72 @@ mod component_access_rules {
         assert_reject_reason(reason, RuntimeError::AccessDeniedOwnerRequired {
             action: ComponentAction::SetAccessRules.into(),
         });
+    }
+
+    #[test]
+    fn set_access_rules_rejects_scoped_requirement() {
+        let mut test = TemplateTest::new(CRATE_PATH, ["tests/templates/access_rules"]);
+
+        let (owner_proof, _, owner_key) = test.create_owner_proof();
+
+        let access_rules_template = test.get_template_address("AccessRulesTest");
+
+        let result = test.execute_expect_success(
+            Transaction::builder_localnet(Epoch(1))
+                .call_function(access_rules_template, "with_configured_rules", args![
+                    OwnerRule::OwnedBySigner,
+                    ComponentAccessRules::new().default(AccessRule::AllowAll),
+                    ResourceAccessRules::new(),
+                    AccessRule::DenyAll,
+                ])
+                .build_and_seal(&owner_key),
+            vec![owner_proof.clone()],
+        );
+
+        let component_address = result.finalize.execution_results[0]
+            .decode::<ComponentAddress>()
+            .unwrap();
+
+        // Build a rule set that bypasses the builder lint, the way a hand-written or non-Rust template
+        // could, and confirm the engine rejects it rather than installing a constant method rule.
+        let degenerate = component_access_rules_with_scoped_method_rule(component_address);
+        assert!(degenerate.contains_scoped_to_component_or_template());
+
+        let reason = test.execute_expect_failure(
+            Transaction::builder_localnet(Epoch(1))
+                .call_method(component_address, "set_component_access_rules", args![degenerate])
+                .build_and_seal(&owner_key),
+            vec![owner_proof],
+        );
+
+        assert_reject_reason(reason, RuntimeError::InvalidArgument {
+            argument: "access_rules",
+            reason: "component(..)/template(..) cannot be used on a component method access rule".to_string(),
+        });
+    }
+
+    fn component_access_rules_with_scoped_method_rule(component: ComponentAddress) -> ComponentAccessRules {
+        use tari_bor::minicbor::{Encode, Encoder};
+
+        // Build the degenerate rule through the public enums and encode/decode it as a full
+        // `ComponentAccessRules`, bypassing the builder lint the way a hand-written or non-Rust template
+        // would.
+        let scoped_rule = AccessRule::Restricted(RestrictedAccessRule::Require(RequireRule::Require(
+            RuleRequirement::ScopedToComponent(component),
+        )));
+
+        let mut e = Encoder::new(Vec::new());
+        // ComponentAccessRules = [ method_access, default ] (positional struct array)
+        e.array(2).unwrap();
+        // method_access = { "set_value": scoped_rule }
+        e.map(1).unwrap();
+        e.str("set_value").unwrap();
+        Encode::encode(&scoped_rule, &mut e, &mut ()).unwrap();
+        // default = DenyAll
+        Encode::encode(&AccessRule::DenyAll, &mut e, &mut ()).unwrap();
+
+        let bytes = e.into_writer();
+        tari_bor::decode(&bytes).unwrap()
     }
 }
 

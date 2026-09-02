@@ -1320,6 +1320,14 @@ where
 
                 let access_rules: ComponentAccessRules = args.assert_one_arg()?;
 
+                if access_rules.contains_scoped_to_component_or_template() {
+                    return Err(RuntimeError::InvalidArgument {
+                        argument: "access_rules",
+                        reason: "component(..)/template(..) cannot be used on a component method access rule"
+                            .to_string(),
+                    });
+                }
+
                 self.tracker.write_with(|state| {
                     let component_lock = state
                         .current_call_scope()?

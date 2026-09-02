@@ -376,6 +376,16 @@ impl ComponentAccessRules {
     pub fn method_access_rules_iter(&self) -> impl Iterator<Item = (&String, &AccessRule)> {
         self.method_access.iter()
     }
+
+    /// Returns `true` if the default rule or any method rule contains `ScopedToComponent` or
+    /// `ScopedToTemplate`, which are constant on component method rules (they always describe the current
+    /// frame, i.e. the callee).
+    pub fn contains_scoped_to_component_or_template(&self) -> bool {
+        self.default.contains_scoped_to_component_or_template() ||
+            self.method_access
+                .values()
+                .any(AccessRule::contains_scoped_to_component_or_template)
+    }
 }
 
 impl Default for ComponentAccessRules {
@@ -669,10 +679,11 @@ impl Default for ResourceAccessRules {
 /// frame, i.e. the callee), and `caller_component(addr)` / `caller_template(addr)` always evaluate to `false` on
 /// **resource** rules; both are rejected at construction by the builder methods. The builder checks are a
 /// template-author lint; the engine additionally rejects `caller_component`/`caller_template` on the dynamic resource
-/// `ResourceAction::UpdateAccessRule` path, but does not re-validate component `SetAccessRules`, so a hand-written or
-/// non-Rust template could still install a constant rule there. `OwnerRule::ByAccessRule` is evaluated in both
-/// contexts, so those requirements are *not* rejected there — check the [`RuleRequirement`] docs before using them in
-/// an owner rule.
+/// `ResourceAction::UpdateAccessRule` path and `component`/`template` on the dynamic component
+/// `ComponentAction::SetAccessRules` path, but does not re-validate resource creation or component creation, so a
+/// hand-written or non-Rust template could still install a constant rule through those paths. `OwnerRule::ByAccessRule`
+/// is evaluated in both contexts, so those requirements are *not* rejected there — check the [`RuleRequirement`] docs
+/// before using them in an owner rule.
 ///
 /// # Examples:
 ///
@@ -1024,5 +1035,24 @@ mod tests {
         ));
         assert!(rule.contains_caller_component_or_template());
         assert!(!rule.contains_scoped_to_component_or_template());
+    }
+
+    #[test]
+    fn component_access_rules_detects_scoped_requirement() {
+        let address = ComponentAddress::new(ObjectKey::default());
+
+        // A valid builder-constructed rule set has no scoped requirement.
+        assert!(
+            !ComponentAccessRules::new()
+                .method("foo", rule!(caller_component(address)))
+                .contains_scoped_to_component_or_template()
+        );
+
+        // A decoded (hand-written) rule set that bypasses the builder is still detected.
+        let mut degenerate = ComponentAccessRules::new();
+        degenerate
+            .method_access
+            .insert("foo".to_string(), rule!(component(address)));
+        assert!(degenerate.contains_scoped_to_component_or_template());
     }
 }
