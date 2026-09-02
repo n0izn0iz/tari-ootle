@@ -155,18 +155,23 @@ fn apply_pragmas(conn: &mut SqliteConnection) -> Result<(), diesel::result::Erro
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use tari_common_types::types::FixedHash;
     use tari_engine_types::{
         fees::FeeReceiptBuilder,
+        substate::SubstateId,
         transaction_receipt::{FinalizeOutcome, TransactionReceipt},
     };
     use tari_indexer_client::types::TransactionSource;
-    use tari_ootle_common_types::{Epoch, NodeHeight, ShardGroup};
+    use tari_indexer_lib::substate_cache::{FetchWatermark, SubstateCacheEntryRef};
+    use tari_ootle_common_types::{Epoch, NodeHeight, ShardGroup, StateVersion};
     use tari_ootle_transaction::{Transaction, TransactionId};
+    use tari_validator_node_rpc::client::SubstateResult;
 
     use super::*;
     use crate::{
-        storage_sqlite::models::VerifiedStateRoot,
+        storage_sqlite::models::{SubstateCacheInvalidation, VerifiedStateRoot},
         store::{IndexerStoreReadTransaction, IndexerStoreReader, IndexerStoreWriteTransaction},
     };
 
@@ -941,5 +946,190 @@ mod tests {
             epoch,
             intent_commitment: Default::default(),
         }
+    }
+
+    // -------------------------------- Substate Cache -------------------------------- //
+
+    /// Matches the value bootstrap passes; the tests only need it to be well above their own offsets.
+    const HEAD_TTL: Duration = Duration::from_secs(900);
+
+    fn substate(n: u8) -> SubstateId {
+        format!("component_{:064x}", n).parse().unwrap()
+    }
+
+    fn now_secs() -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    async fn put_entry(
+        store: &SqliteIndexerStore,
+        id: &SubstateId,
+        version: u32,
+        verified: bool,
+        cached_at: u64,
+        watermark: u64,
+    ) -> bool {
+        let result = SubstateResult::Down { version };
+        let id = id.clone();
+        store
+            .with_write_tx(move |tx| {
+                tx.substate_cache_put(
+                    &id,
+                    SubstateCacheEntryRef {
+                        version,
+                        substate_result: &result,
+                        cached_at,
+                        verified,
+                    },
+                    FetchWatermark::new(watermark),
+                    HEAD_TTL,
+                )
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn put(store: &SqliteIndexerStore, id: &SubstateId, version: u32, watermark: u64) -> bool {
+        put_entry(store, id, version, true, now_secs(), watermark).await
+    }
+
+    async fn read(store: &SqliteIndexerStore, id: &SubstateId) -> Option<u32> {
+        let id = id.clone();
+        store
+            .with_read_tx(move |tx| tx.substate_cache_get(&id))
+            .await
+            .unwrap()
+            .map(|entry| entry.version)
+    }
+
+    async fn invalidate(store: &SqliteIndexerStore, invalidation: SubstateCacheInvalidation, at: u64) {
+        store
+            .with_write_tx(move |tx| tx.substate_cache_invalidate([invalidation], StateVersion::new(at)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_cached_head_is_held_until_a_transition_retires_it() {
+        let (_d, store) = temp_store().await;
+        let id = substate(1);
+        assert!(put(&store, &id, 5, 100).await);
+        assert_eq!(read(&store, &id).await, Some(5));
+
+        invalidate(&store, SubstateCacheInvalidation::created(id.clone(), 6).unwrap(), 105).await;
+        assert_eq!(read(&store, &id).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_destroy_retires_the_version_it_names() {
+        let (_d, store) = temp_store().await;
+        let id = substate(1);
+        assert!(put(&store, &id, 5, 100).await);
+
+        invalidate(&store, SubstateCacheInvalidation::destroyed(id.clone(), 5), 105).await;
+        assert_eq!(read(&store, &id).await, None);
+    }
+
+    /// A head can legitimately run ahead of the transition stream, having come straight from the
+    /// committee. Retiring it on a transition it already accounts for would cost a round trip on every
+    /// read of a substate whose shard is catching up.
+    #[tokio::test]
+    async fn a_transition_leaves_a_higher_cached_head_alone() {
+        let (_d, store) = temp_store().await;
+        let id = substate(1);
+        assert!(put(&store, &id, 9, 100).await);
+
+        invalidate(&store, SubstateCacheInvalidation::created(id.clone(), 7).unwrap(), 105).await;
+        invalidate(&store, SubstateCacheInvalidation::destroyed(id.clone(), 8), 106).await;
+        assert_eq!(read(&store, &id).await, Some(9));
+    }
+
+    /// A committee member that is behind answers with a version below the head already held. Taking it
+    /// would walk the cached head backwards and reopen the window this cache exists to close.
+    #[tokio::test]
+    async fn a_lower_version_does_not_displace_the_cached_head() {
+        let (_d, store) = temp_store().await;
+        let id = substate(1);
+        assert!(put(&store, &id, 6, 100).await);
+        assert!(!put(&store, &id, 5, 100).await);
+        assert_eq!(read(&store, &id).await, Some(6));
+    }
+
+    /// The batch RPC carries no proofs, so a single validator can park an unverified head above any
+    /// version the substate reached. No transition retires a version above the head, so without this
+    /// the proven head could never be written and the entry would be dead until eviction.
+    #[tokio::test]
+    async fn a_verified_result_displaces_an_unverified_head() {
+        let (_d, store) = temp_store().await;
+        let id = substate(1);
+        assert!(put_entry(&store, &id, 999, false, now_secs(), 100).await);
+        assert!(put_entry(&store, &id, 6, true, now_secs(), 100).await);
+        assert_eq!(read(&store, &id).await, Some(6));
+    }
+
+    /// A committee member that is behind can prove an older version against an older signed root, which
+    /// the trusted-root ring accepts by design. A proof attests only that the version existed, so a
+    /// proven head is a lower bound that no amount of elapsed time may walk back.
+    #[tokio::test]
+    async fn an_aged_verified_head_is_still_not_walked_backwards() {
+        let (_d, store) = temp_store().await;
+        let id = substate(1);
+        let aged = now_secs() - HEAD_TTL.as_secs() - 1;
+        assert!(put_entry(&store, &id, 10, true, aged, 100).await);
+        assert!(!put_entry(&store, &id, 6, true, now_secs(), 100).await);
+        assert_eq!(read(&store, &id).await, Some(10));
+    }
+
+    /// An unverified head is not a lower bound on anything, and with proof verification off nothing
+    /// outranks it, so ageing it out is the only way a wrong one is ever corrected.
+    #[tokio::test]
+    async fn an_aged_unverified_head_does_not_block_a_lower_version() {
+        let (_d, store) = temp_store().await;
+        let id = substate(1);
+        let stale = now_secs() - HEAD_TTL.as_secs() - 1;
+        assert!(put_entry(&store, &id, 999, false, stale, 100).await);
+        assert!(put_entry(&store, &id, 6, false, now_secs(), 100).await);
+        assert_eq!(read(&store, &id).await, Some(6));
+    }
+
+    #[tokio::test]
+    async fn a_write_is_vetoed_by_a_transition_that_landed_during_the_fetch() {
+        let (_d, store) = temp_store().await;
+        let id = substate(1);
+        invalidate(&store, SubstateCacheInvalidation::created(id.clone(), 6).unwrap(), 105).await;
+
+        assert!(!put(&store, &id, 6, 100).await);
+        assert_eq!(read(&store, &id).await, None);
+
+        // The same result fetched against a watermark that already covers the transition is current.
+        assert!(put(&store, &id, 6, 105).await);
+        assert_eq!(read(&store, &id).await, Some(6));
+    }
+
+    #[tokio::test]
+    async fn pruning_evicts_down_to_the_cap_and_expires_the_journal() {
+        let (_d, store) = temp_store().await;
+        // Descending `cached_at`, so the substates with the lowest n are the oldest and evicted first.
+        let now = now_secs();
+        for n in 0..5u8 {
+            assert!(put_entry(&store, &substate(n), 1, true, now - u64::from(4 - n), 100).await);
+        }
+        invalidate(&store, SubstateCacheInvalidation::created(substate(9), 1).unwrap(), 105).await;
+
+        store
+            .with_write_tx(|tx| tx.substate_cache_prune(Duration::ZERO, 2))
+            .await
+            .unwrap();
+
+        let mut remaining = Vec::new();
+        for n in 0..5u8 {
+            if read(&store, &substate(n)).await.is_some() {
+                remaining.push(n);
+            }
+        }
+        assert_eq!(remaining, vec![3, 4], "eviction did not take the oldest entries");
+
+        // With the journal expired, a fetch that started before the transition is no longer vetoed.
+        assert!(put(&store, &substate(9), 1, 100).await);
     }
 }

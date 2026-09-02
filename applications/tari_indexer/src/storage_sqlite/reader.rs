@@ -33,6 +33,7 @@ use tari_indexer_client::types::{
     TransactionSource,
     UtxoStateUpdateSet,
 };
+use tari_indexer_lib::substate_cache::SubstateCacheEntry;
 use tari_ootle_common_types::{
     Epoch,
     NodeHeight,
@@ -61,6 +62,7 @@ use crate::{
         models::{
             EventRecord,
             KeyValue,
+            SubstateCacheRow,
             SubstateRecord,
             TemplateCatalogueEntry,
             TemplateCatalogueRow,
@@ -69,7 +71,7 @@ use crate::{
             WatchedSubstateEntry,
             WatchedSubstateRow,
         },
-        serialization::{deserialize_hex_try_from, deserialize_json, serialize_hex},
+        serialization::{deserialize_bincode, deserialize_hex_try_from, deserialize_json, serialize_hex},
     },
     store::{IndexerStoreReadTransaction, TransactionRejectionStatus},
     substate_manager::SubstateResponse,
@@ -1108,6 +1110,29 @@ impl IndexerStoreReadTransaction for SqliteStoreReadTransaction<'_> {
                 height: NodeHeight(row.block_height as u64),
                 block_hash: deserialize_hex_try_from(&row.block_hash)?,
                 state_merkle_root: deserialize_hex_try_from(&row.state_merkle_root)?,
+            })
+        })
+        .transpose()
+    }
+
+    fn substate_cache_get(&mut self, substate_id: &SubstateId) -> Result<Option<SubstateCacheEntry>, StorageError> {
+        const OPERATION: &str = "substate_cache_get";
+        use crate::storage_sqlite::schema::substate_cache;
+
+        let row: Option<SubstateCacheRow> = substate_cache::table
+            .filter(substate_cache::substate_id.eq(substate_id.to_string()))
+            .first(self.connection())
+            .optional()
+            .map_err(|e| StorageError::QueryError {
+                reason: format!("{OPERATION}: {e}"),
+            })?;
+
+        row.map(|row| {
+            Ok(SubstateCacheEntry {
+                version: row.version as u32,
+                substate_result: deserialize_bincode(&row.substate_result)?,
+                cached_at: row.cached_at as u64,
+                verified: row.verified,
             })
         })
         .transpose()
