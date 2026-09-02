@@ -181,7 +181,7 @@ pub(super) struct WorkingState<TStore> {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct MethodCaller {
     pub component: Option<ComponentAddress>,
-    pub template: Option<TemplateAddress>,
+    pub template: TemplateAddress,
 }
 
 impl<TStore: StateReader> WorkingState<TStore> {
@@ -1505,9 +1505,9 @@ impl<TStore: StateReader> WorkingState<TStore> {
     /// Returns the caller of the current component method, i.e. the component/template that was
     /// current immediately before the callee's frame was pushed. `None` when the method is invoked
     /// directly from a top-level transaction instruction (no caller frame).
-    pub fn method_caller(&self) -> Result<Option<MethodCaller>, RuntimeError> {
+    pub fn method_caller(&self) -> Option<MethodCaller> {
         if self.call_frames.len() < 2 {
-            return Ok(None);
+            return None;
         }
         let caller = &self.call_frames[self.call_frames.len() - 2];
         let component = caller
@@ -1515,10 +1515,7 @@ impl<TStore: StateReader> WorkingState<TStore> {
             .get_current_component_lock()
             .and_then(|lock| lock.substate_id().as_component_address());
         let template = *caller.current_template();
-        Ok(Some(MethodCaller {
-            component,
-            template: Some(template),
-        }))
+        Some(MethodCaller { component, template })
     }
 
     pub fn get_auth_caller(&self) -> Result<AuthHookCaller, RuntimeError> {

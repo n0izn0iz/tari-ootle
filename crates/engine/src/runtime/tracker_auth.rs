@@ -25,6 +25,16 @@ use crate::{
     state_store::StateReader,
 };
 
+/// The identity an access rule is evaluated against.
+#[derive(Clone, Copy)]
+enum RuleContext {
+    /// Resource, ownership and covenant checks: the current (top) frame is the actor.
+    CurrentFrame,
+    /// Component method checks: the actor is the frame immediately below the callee. `None` when the
+    /// method is invoked directly by a top-level transaction instruction (the signer is the caller).
+    Caller(Option<MethodCaller>),
+}
+
 pub struct Authorization<'a, TStore> {
     state: &'a WorkingState<TStore>,
 }
@@ -45,7 +55,11 @@ impl<'a, TStore: StateReader> Authorization<'a, TStore> {
             })?;
         let component = self.state.get_component(locked)?;
         let scope = self.state.current_call_scope()?.auth_scope();
-        if check_ownership(self.state, scope, component.as_ownership())? {
+
+        // The callee frame is already on top of the stack here, so both the ownership check and the
+        // method access rule must be evaluated against the caller (the frame below the callee).
+        let context = RuleContext::Caller(self.state.method_caller());
+        if check_ownership(self.state, scope, component.as_ownership(), context)? {
             // Owner can call any component method
             return Ok(());
         }
@@ -59,12 +73,8 @@ impl<'a, TStore: StateReader> Authorization<'a, TStore> {
                     details: format!("Expected a component address, got {}", locked.substate_id()),
                 })?;
 
-        // Method access rules are evaluated against the caller, not the callee frame that is already on
-        // top of the stack: `rule!(component(addr))` / `rule!(template(addr))` mean "callable from this
-        // component/template".
         let access_rule = component.access_rules().get_method_access_rule(method);
-        let caller = self.state.method_caller()?;
-        if !check_access_rule(self.state, scope, access_rule, caller)? {
+        if !check_access_rule(self.state, scope, access_rule, context)? {
             return Err(RuntimeError::AccessDenied {
                 action_ident: ActionIdent::ComponentCallMethod {
                     component_address,
@@ -85,13 +95,13 @@ impl<'a, TStore: StateReader> Authorization<'a, TStore> {
 
         // Check ownership.
         // A resource is only recallable by explicit access rules
-        if !action.is_recall() && check_ownership(self.state, scope, resource_ownership)? {
+        if !action.is_recall() && check_ownership(self.state, scope, resource_ownership, RuleContext::CurrentFrame)? {
             // Owner can invoke any resource method
             return Ok(());
         }
 
         let rule = resource_access_rules.get_access_rule(&action);
-        if !check_access_rule(self.state, scope, rule, None)? {
+        if !check_access_rule(self.state, scope, rule, RuleContext::CurrentFrame)? {
             return Err(RuntimeError::AccessDenied {
                 action_ident: action.into(),
             });
@@ -102,13 +112,13 @@ impl<'a, TStore: StateReader> Authorization<'a, TStore> {
 
     pub fn check_access_rule(&self, rule: &AccessRule) -> Result<bool, RuntimeError> {
         let scope = self.state.current_call_scope()?.auth_scope();
-        check_access_rule(self.state, scope, rule, None)
+        check_access_rule(self.state, scope, rule, RuleContext::CurrentFrame)
     }
 
     /// Returns `true` if the current call scope satisfies the given ownership rule.
     pub fn check_ownership(&self, ownership: Ownership<'_>) -> Result<bool, RuntimeError> {
         let scope = self.state.current_call_scope()?.auth_scope();
-        check_ownership(self.state, scope, ownership)
+        check_ownership(self.state, scope, ownership, RuleContext::CurrentFrame)
     }
 
     pub fn require_ownership<A: Into<ActionIdent>>(
@@ -116,7 +126,12 @@ impl<'a, TStore: StateReader> Authorization<'a, TStore> {
         action: A,
         ownership: Ownership<'_>,
     ) -> Result<(), RuntimeError> {
-        if !check_ownership(self.state, self.state.current_call_scope()?.auth_scope(), ownership)? {
+        if !check_ownership(
+            self.state,
+            self.state.current_call_scope()?.auth_scope(),
+            ownership,
+            RuleContext::CurrentFrame,
+        )? {
             return Err(RuntimeError::AccessDeniedOwnerRequired { action: action.into() });
         }
         Ok(())
@@ -127,10 +142,11 @@ fn check_ownership<TStore: StateReader>(
     state: &WorkingState<TStore>,
     scope: &AuthorizationScope,
     ownership: Ownership<'_>,
+    context: RuleContext,
 ) -> Result<bool, RuntimeError> {
     match ownership.owner_rule.as_ref() {
         SubstateOwnerRule::None => Ok(false),
-        SubstateOwnerRule::ByAccessRule(rule) => check_access_rule(state, scope, rule, None),
+        SubstateOwnerRule::ByAccessRule(rule) => check_access_rule(state, scope, rule, context),
         SubstateOwnerRule::ByPublicKey(key) => {
             let owner_proof = NonFungibleAddress::from_public_key(*key);
             Ok(scope.contains_badge(&owner_proof))
@@ -142,12 +158,12 @@ fn check_access_rule<TStore: StateReader>(
     state: &WorkingState<TStore>,
     scope: &AuthorizationScope,
     rule: &AccessRule,
-    caller: Option<MethodCaller>,
+    context: RuleContext,
 ) -> Result<bool, RuntimeError> {
     match rule {
         AccessRule::AllowAll => Ok(true),
         AccessRule::DenyAll => Ok(false),
-        AccessRule::Restricted(rule) => check_restricted_access_rule(state, scope, rule, caller),
+        AccessRule::Restricted(rule) => check_restricted_access_rule(state, scope, rule, context),
     }
 }
 
@@ -155,13 +171,13 @@ fn check_restricted_access_rule<TStore: StateReader>(
     state: &WorkingState<TStore>,
     scope: &AuthorizationScope,
     rule: &RestrictedAccessRule,
-    caller: Option<MethodCaller>,
+    context: RuleContext,
 ) -> Result<bool, RuntimeError> {
     match rule {
-        RestrictedAccessRule::Require(rule) => check_require_rule(state, scope, rule, caller),
+        RestrictedAccessRule::Require(rule) => check_require_rule(state, scope, rule, context),
         RestrictedAccessRule::AnyOf(rules) => {
             for rule in rules {
-                if check_restricted_access_rule(state, scope, rule, caller)? {
+                if check_restricted_access_rule(state, scope, rule, context)? {
                     return Ok(true);
                 }
             }
@@ -173,7 +189,7 @@ fn check_restricted_access_rule<TStore: StateReader>(
                 return Ok(false);
             }
             for rule in rules {
-                if !check_restricted_access_rule(state, scope, rule, caller)? {
+                if !check_restricted_access_rule(state, scope, rule, context)? {
                     return Ok(false);
                 }
             }
@@ -186,13 +202,13 @@ fn check_require_rule<TStore: StateReader>(
     state: &WorkingState<TStore>,
     scope: &AuthorizationScope,
     rule: &RequireRule,
-    caller: Option<MethodCaller>,
+    context: RuleContext,
 ) -> Result<bool, RuntimeError> {
     match rule {
-        RequireRule::Require(requirement) => check_requirement(state, scope, requirement, caller),
+        RequireRule::Require(requirement) => check_requirement(state, scope, requirement, context),
         RequireRule::AnyOf(requirements) => {
             for requirement in requirements {
-                if check_requirement(state, scope, requirement, caller)? {
+                if check_requirement(state, scope, requirement, context)? {
                     return Ok(true);
                 }
             }
@@ -205,7 +221,7 @@ fn check_require_rule<TStore: StateReader>(
                 return Ok(false);
             }
             for requirement in requirements {
-                if !check_requirement(state, scope, requirement, caller)? {
+                if !check_requirement(state, scope, requirement, context)? {
                     return Ok(false);
                 }
             }
@@ -219,7 +235,7 @@ fn check_require_rule<TStore: StateReader>(
             }
             let mut satisfied = 0u16;
             for requirement in requirements {
-                if check_requirement(state, scope, requirement, caller)? {
+                if check_requirement(state, scope, requirement, context)? {
                     satisfied += 1;
                     if satisfied == *n {
                         return Ok(true);
@@ -236,7 +252,7 @@ fn check_requirement<TStore: StateReader>(
     state: &WorkingState<TStore>,
     scope: &AuthorizationScope,
     requirement: &RuleRequirement,
-    caller: Option<MethodCaller>,
+    context: RuleContext,
 ) -> Result<bool, RuntimeError> {
     match requirement {
         RuleRequirement::Resource(resx) => {
@@ -270,22 +286,23 @@ fn check_requirement<TStore: StateReader>(
 
             Ok(false)
         },
-        // `caller` is `None` in two cases:
-        // 1. resource/ownership checks — the current frame is the caller, so the fallback is correct;
-        // 2. a top-level transaction calls the method directly — the caller is just the signer, with no
-        //    component/template identity to match.
-        // For case 2 the fallback resolves to the callee, so a rule gated on its own address
-        // (`component(own_address)`) or template (`template(own_template)`) still matches a direct signer call.
-        RuleRequirement::ScopedToComponent(address) => match caller {
-            Some(caller) => Ok(caller.component == Some(*address)),
-            None => Ok(state.current_component()? == Some(*address)),
+        // `ScopedToComponent` / `ScopedToTemplate` mean "execution is within this component/template":
+        // they always describe the current (top) frame, which is the actor on resource/ownership checks
+        // and the callee on method checks.
+        RuleRequirement::ScopedToComponent(address) => Ok(state.current_component()? == Some(*address)),
+        RuleRequirement::ScopedToTemplate(address) => {
+            let current = state.current_template()?;
+            Ok(current == address)
         },
-        RuleRequirement::ScopedToTemplate(address) => match caller {
-            Some(caller) => Ok(caller.template == Some(*address)),
-            None => {
-                let current = state.current_template()?;
-                Ok(current == address)
-            },
+        // `CallerComponent` / `CallerTemplate` mean "the caller is this component/template": they are only
+        // meaningful on method checks, and a top-level signer has no component/template identity to match.
+        RuleRequirement::CallerComponent(address) => match context {
+            RuleContext::Caller(Some(caller)) => Ok(caller.component == Some(*address)),
+            RuleContext::Caller(None) | RuleContext::CurrentFrame => Ok(false),
+        },
+        RuleRequirement::CallerTemplate(address) => match context {
+            RuleContext::Caller(Some(caller)) => Ok(caller.template == *address),
+            RuleContext::Caller(None) | RuleContext::CurrentFrame => Ok(false),
         },
     }
 }
