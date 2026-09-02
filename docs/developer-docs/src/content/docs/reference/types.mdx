@@ -2,7 +2,8 @@
 title: Types Reference
 description: Detailed documentation of types in the Tari Ootle Template Library.
 ---
-import { basePath } from '../../../helpers/path';
+
+import { basePath } from "../../../helpers/path";
 
 The `tari_template_lib_types` crate defines a rich set of types that are fundamental to building Tari Ootle Templates. These types are designed to be efficiently serialized and deserialized by the validator engine and provide a safe and structured way to interact with on-chain data.
 
@@ -14,9 +15,10 @@ Many of these types are re-exported through `tari_template_lib::prelude::*`, mak
 
 Represents a quantity of a fungible resource. It is a `u64` wrapper with specialized serialization/deserialization for large numbers and decimal precision (when the `precision` feature is enabled).
 
--   **Purpose:** Used for all fungible token balances, supplies, and transfer amounts.
--   **Usage Example:**
-```rust
+- **Purpose:** Used for all fungible token balances, supplies, and transfer amounts.
+- **Usage Example:**
+
+````rust
 use tari_template_lib::prelude::*;
 let amount = Amount(100_000);
 let total_supply = Amount(1_000_000_000);
@@ -43,9 +45,9 @@ A unique identifier for a deployed component instance.
 -   **Usage Example:**
 ```rust
 use tari_template_lib::prelude::*;
-// Assuming 'my_component' is an instance of your component struct
-// let component_address: ComponentAddress =
-//     ComponentBuilder::new().create_component("MyComponent", my_component);
+// Assuming `my_component` is an instance of your component struct
+// let component = Component::new(my_component).create();
+// let component_address: &ComponentAddress = component.address();
     ```
 
 #### `VaultId`
@@ -83,15 +85,19 @@ The address of an on-chain substate. Substates are the atomic units of data on t
 
 Defines permission levels for component methods or resource operations.
 
--   **Variants:** `AllowAll`, `DenyAll`, `Restricted(Vec<Identity>)`, `Owner`.
+-   **Variants:** `AllowAll`, `DenyAll`, `Restricted(RestrictedAccessRule)`.
 -   **Purpose:** Granular control over who can interact with your smart contracts.
--   **Usage Example:** See <a href={basePath("/guides/authorization-and-access/")}>Authorization and Access</a> guide.
 
-#### `AccessRules`
+`RestrictedAccessRule` is normally built with the `rule!` macro rather than by hand. Its requirements include
+`resource`, `non_fungible`, `public_key`, `component`, `template`, `caller_component` and `caller_template`,
+which can be combined with `any_of`, `all_of` and `m_of_n`. See the
+<a href={basePath("/guides/authorization-and-access/")}>Authorization and Access</a> guide for the semantics.
 
-A collection of `AccessRule`s applied to a component or resource.
+#### `ComponentAccessRules` / `ResourceAccessRules`
 
--   **Purpose:** To define the complete access policy.
+Collections of `AccessRule`s applied to a component's methods or a resource's actions respectively.
+
+-   **Purpose:** To define the complete access policy for a component or resource.
 
 #### `Identity`
 
@@ -105,3 +111,4 @@ Represents an entity that can be granted or denied access. Can be a `ComponentAd
 -   **`Metadata`**: Key-value pairs for attaching arbitrary data to resources or components.
 
 This is not an exhaustive list but covers the most frequently used types. For a complete reference, consult the Rust documentation for the `tari_template_lib_types` crate.
+````

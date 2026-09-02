@@ -6,8 +6,9 @@ description: Control who can interact with your Tari Ootle Components and Resour
 ### Covered in this guide
 
 In this guide, you will:
+
 - Understand the importance of authorization and access control in smart contract security.
-- Learn how to define and apply `AccessRules` for components and their methods.
+- Learn how to define and apply access rules for components and their methods.
 - Discover how to set permissions for resources, including minting, burning, and metadata access.
 - Explore identity management and the different types of callers in the Tari Ootle environment.
 - Follow best practices for securing templates and managing digital assets.
@@ -18,11 +19,12 @@ Authorization and access control are critical aspects of smart contract security
 
 Access rules determine which identities (Components, users, or other templates) are allowed to perform certain actions. They are typically defined when a Component is created or a Resource is minted.
 
-The `AccessRules` struct is used to configure these permissions.
+Access rules are configured with `ComponentAccessRules` (for component methods) and `ResourceAccessRules` (for resource actions).
 
 #### Component Access Rules
 
-When you create a Component, you can specify `AccessRules` for its methods.
+When you create a Component, you can specify access rules for each of its methods. These rules decide
+which caller may invoke the method.
 
 ```rust
 use tari_template_lib::prelude::*;
@@ -35,33 +37,66 @@ mod template {
 
     pub fn create_with_access_rules(
         admin_badge: ResourceAddress,
-    ) -> ComponentAddress {
-        let component = MyComponent { /* ... */ }; // Your component instance
-
-        let component_address = Component::new(component)
+    ) -> Component<MyComponent> {
+        Component::new(MyComponent { /* ... */ })
             .with_access_rules(ComponentAccessRules::new()
-                // Allow anyone to call the 'public_method'
+                // Allow anyone to call `public_method`.
                 .method("public_method", rule!(allow_all))
-                // Only allow the 'admin_component' to call the 'admin_method'
-                .method("admin_method", rule!(require(admin_badge)])
-                // Default rule: anyone can call methods not
-                // explicitly listed. Without a default rule it
-                // defaults to `DenyAll` — only the owner can call.
+                // Only a caller holding `admin_badge` may call `admin_method`.
+                .method("admin_method", rule!(resource(admin_badge)))
+                // Default rule: anyone can call methods not explicitly
+                // listed. With no default rule, unlisted methods default to
+                // `deny_all`, so only the owner may call them.
                 .default(rule!(allow_all))
             )
-            .create_component("my_secured_component", component);
-        component_address
+            .create()
     }
 }
 ```
 
--   `ComponentAccessRules::new()`: Creates a new set of component access rules.
--   `.method("method_name", AccessRule)`: Defines an access rule for a specific method.
--   `AccessRule::AllowAll`: Allows any caller to execute the method.
--   `AccessRule::Restricted(vec![identity1, identity2, ...])`: Only allows callers whose identity matches one of the provided identities. Identities can be `ComponentAddress`, `ResourceAddress`, `TemplateAddress`, etc.
--   `AccessRule::DenyAll`: Denies all callers from executing the method.
--   `AccessRule::Owner`: Only allows the owner of the component to execute the method. (Note: "owner" is a specific concept often tied to the initial deployer or a designated resource holder).
--   `default_access_rule(AccessRule)`: Sets the default rule for any method not explicitly defined.
+- `ComponentAccessRules::new()`: Creates a new set of component access rules with a `deny_all` default.
+- `ComponentAccessRules::allow_all()`: Creates a set of rules where every method is callable by anyone by default.
+- `.method("method_name", AccessRule)`: Defines an access rule for a specific method.
+- `.default(AccessRule)`: Sets the default rule for any method not explicitly listed (defaults to `deny_all`).
+
+Ownership is configured separately with `.with_owner_rule(OwnerRule::...)`; the component owner may always
+call any method. `OwnerRule` defaults to `OwnedBySigner`, meaning the transaction signer that created the
+component owns it.
+
+The `rule!` macro builds an `AccessRule`. The base rules are `rule!(allow_all)` and `rule!(deny_all)`; a
+restricted rule wraps one or more **requirements**:
+
+- `rule!(resource(address))` — the caller presents proof of a fungible resource.
+- `rule!(non_fungible(address))` / `rule!(public_key(pk))` — the caller presents proof of an NFT, or a signature by the given public key.
+- `rule!(component(address))` — execution is within the given component (the current frame is that component).
+- `rule!(template(address))` — execution is within the given template (the current frame is that template).
+- `rule!(caller_component(address))` — the caller of a component method is the given component.
+- `rule!(caller_template(address))` — the caller of a component method belongs to the given template.
+- `rule!(any_of(...))`, `rule!(all_of(...))`, `rule!(m_of_n(n, ...))` — combine requirements.
+
+#### Caller vs. current component
+
+There are two related but distinct ways a rule can reference a component or template:
+
+- `component(address)` / `template(address)` ask _"is execution happening inside this component/template?"_.
+  On a method access rule the current (top) frame is the **callee**, so these describe the callee, not
+  the caller. Use them when a method should only run while that component/template is executing, or when
+  the same rule is evaluated for resource/ownership checks where the current frame is the actor.
+
+- `caller_component(address)` / `caller_template(address)` ask _"is the caller this component/template?"_.
+  These are meaningful on **component method** access rules: the caller is the component/template whose
+  frame was current immediately before the callee's frame was pushed. `caller_template(address)` matches a
+  component instance of that template **or** a static (template-function) call from that template, because
+  a static function has a template identity but no component instance.
+
+A method invoked directly by a top-level transaction instruction has no caller component/template frame —
+the caller is a signer — so `caller_component` / `caller_template` rules **deny** it. Use a badge, public
+key, or other proof requirement to allow signer-driven calls.
+
+**Caution:** `caller_component` / `caller_template` match the immediate caller's identity, which is only as
+trustworthy as the code that makes the call. A method that forwards a caller-supplied component/template and
+method (a "proxy" method) delegates that identity, so anyone who can call the proxy can act as the proxied
+caller.
 
 #### Resource Access Rules
 
@@ -106,24 +141,24 @@ mod template {
 
 Each `ResourceBuilder` exposes one method per action. All accept `(rule, updater)`:
 
--   `.mintable(rule, updater)` — who can mint new units of this resource.
--   `.burnable(rule, updater)` — who can burn units.
--   `.recallable(rule, updater)` — who can recall units from any external vault.
--   `.freezable(rule, updater)` — who can freeze a vault holding this resource.
--   `.withdrawable(rule, updater)` — who can withdraw this resource from vaults.
--   `.depositable(rule, updater)` — who can deposit this resource into vaults.
--   `.update_metadata(rule, updater)` — who can change the metadata (the token symbol always stays immutable).
--   `.update_non_fungible_data(rule, updater)` — who can change the mutable data on individual NFTs (non-fungible only).
+- `.mintable(rule, updater)` — who can mint new units of this resource.
+- `.burnable(rule, updater)` — who can burn units.
+- `.recallable(rule, updater)` — who can recall units from any external vault.
+- `.freezable(rule, updater)` — who can freeze a vault holding this resource.
+- `.withdrawable(rule, updater)` — who can withdraw this resource from vaults.
+- `.depositable(rule, updater)` — who can deposit this resource into vaults.
+- `.update_metadata(rule, updater)` — who can change the metadata (the token symbol always stays immutable).
+- `.update_non_fungible_data(rule, updater)` — who can change the mutable data on individual NFTs (non-fungible only).
 
 ##### UpdateRule
 
 `UpdateRule` controls who can later change an access rule, and has three variants:
 
-| `UpdateRule`             | Constant   | Behaviour                                                                   |
-|--------------------------|------------|-----------------------------------------------------------------------------|
-| `UpdateRule::Locked`     | `LOCKED`   | Nobody — not even the resource owner — can change the rule.                 |
-| `UpdateRule::Owner`      | `OWNER`    | Only the resource owner (per the `OwnerRule`) can change the rule.          |
-| `UpdateRule::AccessRule` | _n/a_      | Anyone satisfying the inner `AccessRule` can change the rule. No implicit owner override. |
+| `UpdateRule`             | Constant | Behaviour                                                                                 |
+| ------------------------ | -------- | ----------------------------------------------------------------------------------------- |
+| `UpdateRule::Locked`     | `LOCKED` | Nobody — not even the resource owner — can change the rule.                               |
+| `UpdateRule::Owner`      | `OWNER`  | Only the resource owner (per the `OwnerRule`) can change the rule.                        |
+| `UpdateRule::AccessRule` | _n/a_    | Anyone satisfying the inner `AccessRule` can change the rule. No implicit owner override. |
 
 Why `Locked` matters — it is the only way to make a trust promise to holders that **cannot be quietly retracted
 later**. If `recall` is `DenyAll` but the updater is `Owner`, the owner can flip recall back on after users have
@@ -177,17 +212,21 @@ has **no implicit override**.
 
 Callers are identified by various types, depending on the context:
 
--   `ComponentAddress`: When a component calls another component.
--   `ResourceAddress`: When a resource grants specific permissions (e.g., holding a specific NFT grants voting rights).
--   `TemplateAddress`: When a template has specific rights.
--   User identities: Through the transaction's signers or proofs provided.
+- `ComponentAddress`: When a component calls another component.
+- `ResourceAddress`: When a resource grants specific permissions (e.g., holding a specific NFT grants voting rights).
+- `TemplateAddress`: When a template has specific rights.
+- User identities: Through the transaction's signers or proofs provided.
 
 The `auth` module in `tari_template_lib` provides utilities for working with identities and proofs within your templates.
 
+These identities appear in `rule!` requirements: `component(...)` / `template(...)` refer to the current
+execution scope, while `caller_component(...)` / `caller_template(...)` refer to the method's caller (see
+[Caller vs. current component](#caller-vs-current-component)).
+
 ### Best Practices
 
--   **Principle of Least Privilege:** Grant only the necessary permissions. Avoid `AllowAll` unless it's genuinely intended for public methods.
--   **Clear Ownership:** Define and manage component/resource ownership clearly.
--   **Test Thoroughly:** Always write comprehensive tests to ensure your access rules behave as expected.
+- **Principle of Least Privilege:** Grant only the necessary permissions. Avoid `AllowAll` unless it's genuinely intended for public methods.
+- **Clear Ownership:** Define and manage component/resource ownership clearly.
+- **Test Thoroughly:** Always write comprehensive tests to ensure your access rules behave as expected.
 
 By effectively utilizing access rules, you can ensure the security and integrity of your Tari Ootle Templates and the assets they manage.
