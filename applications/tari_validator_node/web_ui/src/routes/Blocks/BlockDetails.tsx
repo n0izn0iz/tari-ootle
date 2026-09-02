@@ -23,13 +23,26 @@
 import { useState, useEffect } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Accordion, AccordionDetails, AccordionSummary } from "../../Components/Accordion";
-import { Grid, Table, TableContainer, TableBody, TableRow, TableCell, Button, Fade, Alert } from "@mui/material";
+import {
+  Grid,
+  Table,
+  TableContainer,
+  TableBody,
+  TableRow,
+  TableCell,
+  Button,
+  Fade,
+  Alert,
+  Box,
+  Tooltip,
+} from "@mui/material";
 import Typography from "@mui/material/Typography";
 import { DataTableCell, StyledPaper } from "../../Components/StyledComponents";
 import PageHeading from "../../Components/PageHeading";
 import StatusChip from "../../Components/StatusChip";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
+import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import Loading from "../../Components/Loading";
 import { getBlock, getIdentity } from "../../utils/json_rpc";
 import Transactions from "./Transactions";
@@ -54,6 +67,46 @@ const COMMANDS = [
 
 type OtherCommands = Record<string, Array<any>>;
 
+function BudgetCell({ used, budget, tooltip }: { used: number; budget: number; tooltip: string }) {
+  if (!budget) {
+    return <>{used.toLocaleString()}</>;
+  }
+  const percent = (used / budget) * 100;
+  // Sub-0.01% blocks are the common case on a quiet network, so distinguish them from empty rather than rounding
+  // them to zero.
+  const share = !used ? "0" : percent < 0.01 ? "<0.01" : percent.toFixed(2);
+  return (
+    <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+      {used.toLocaleString()} ({share}%)
+      <Tooltip arrow title={tooltip}>
+        <HelpOutlineIcon sx={{ fontSize: "1rem", opacity: 0.6, cursor: "help" }} />
+      </Tooltip>
+    </Box>
+  );
+}
+
+// The per-block budget governs WASM and native points together, so only their sum may be shown as a share of it.
+function ExecutionPointsCell({ wasm, native, max }: { wasm: bigint; native: bigint; max: bigint }) {
+  return (
+    <BudgetCell
+      used={Number(wasm) + Number(native)}
+      budget={Number(max)}
+      tooltip="Compute metered for this block, against the per-block budget."
+    />
+  );
+}
+
+// The sum follows the validation rule, so it belongs with the validation bound and no other budget.
+function BlockWeightCell({ weight, max }: { weight: bigint; max: bigint }) {
+  return (
+    <BudgetCell
+      used={Number(weight)}
+      budget={Number(max)}
+      tooltip="Size and IO cost of this block's transactions, against the most a replica will vote for."
+    />
+  );
+}
+
 export default function BlockDetails() {
   const { blockId } = useParams();
   const [expandedPanels, setExpandedPanels] = useState<string[]>([]);
@@ -68,6 +121,10 @@ export default function BlockDetails() {
   const [identity, setIdentity] = useState<VNGetIdentityResponse>();
   const [blockTime, setBlockTime] = useState<number>(0);
   const [wasmPoints, setWasmPoints] = useState<bigint>(0n);
+  const [nativePoints, setNativePoints] = useState<bigint>(0n);
+  const [maxExecutionPoints, setMaxExecutionPoints] = useState<bigint>(0n);
+  const [blockWeight, setBlockWeight] = useState<bigint>(0n);
+  const [maxBlockWeight, setMaxBlockWeight] = useState<bigint>(0n);
   const [foreignProposals, setForeignProposals] = useState<ForeignProposalAtom[]>([]);
 
   useEffect(() => {
@@ -77,6 +134,10 @@ export default function BlockDetails() {
           setIdentity(identity);
           setBlock(resp.block);
           setWasmPoints(resp.total_wasm_execution_points);
+          setNativePoints(resp.total_native_execution_points);
+          setMaxExecutionPoints(resp.max_block_execution_points);
+          setBlockWeight(resp.total_block_execution_weight);
+          setMaxBlockWeight(resp.max_block_validation_weight);
           getBlock({ block_id: resp.block.header.parent }).then((justify_block) => {
             if (resp.block.stored_at && justify_block.block.stored_at) {
               let blockTime = resp.block.block_time || 0;
@@ -208,9 +269,16 @@ export default function BlockDetails() {
                             </DataTableCell>
                           </TableRow>
                           <TableRow>
-                            <TableCell title="Total WASM metering points consumed by transactions executed for this block">WASM
-                              Points</TableCell>
-                            <DataTableCell>{wasmPoints.toString()}</DataTableCell>
+                            <TableCell>Execution Weight</TableCell>
+                            <DataTableCell>
+                              <BlockWeightCell weight={blockWeight} max={maxBlockWeight} />
+                            </DataTableCell>
+                          </TableRow>
+                          <TableRow>
+                            <TableCell>Execution Points</TableCell>
+                            <DataTableCell>
+                              <ExecutionPointsCell wasm={wasmPoints} native={nativePoints} max={maxExecutionPoints} />
+                            </DataTableCell>
                           </TableRow>
                           <TableRow>
                             <TableCell>Status</TableCell>
