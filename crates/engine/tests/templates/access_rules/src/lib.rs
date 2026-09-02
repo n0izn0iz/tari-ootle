@@ -119,6 +119,33 @@ mod access_rules_template {
             .create()
         }
 
+        pub fn with_auth_hook_gated_on_caller(hook_caller: ComponentAddress) -> Component<AccessRulesTest> {
+            let badges = create_badge_resource(rule!(deny_all));
+
+            let address_alloc = CallerContext::allocate_component_address(None);
+
+            let tokens = ResourceBuilder::public_fungible()
+                .with_authorization_hook(address_alloc.get_address(), "caller_gated_hook")
+                .initial_supply(1000u32);
+
+            Component::new(Self {
+                value: 0,
+                tokens: Vault::from_bucket(tokens),
+                badges: Vault::from_bucket(badges),
+                allowed: true,
+                attack_component: None,
+            })
+            .with_address_allocation(address_alloc)
+            .with_owner_rule(OwnerRule::None)
+            .with_access_rules(
+                ComponentAccessRules::new()
+                    .method("caller_gated_hook", rule!(caller_component(hook_caller)))
+                    .method("take_tokens", rule!(allow_all))
+                    .default(rule!(deny_all)),
+            )
+            .create()
+        }
+
         pub fn using_badge_rules() -> Component<AccessRulesTest> {
             let badges = create_badge_resource(rule!(allow_all));
 
@@ -217,6 +244,10 @@ mod access_rules_template {
                 panic!("Access denied for action {:?}", action);
             }
         }
+
+        /// Auth hook gated purely by the hook component's access rules on the acting caller. Used to
+        /// verify that the hook observes the acting component (not the hook author) as its caller.
+        pub fn caller_gated_hook(&self, _action: ResourceAuthAction, _caller: AuthHookCaller) {}
 
         pub fn malicious_auth_hook_set_state(&self, action: ResourceAuthAction, caller: AuthHookCaller) {
             debug!("malicious_auth_hook_set_state: action = {:?}", action);

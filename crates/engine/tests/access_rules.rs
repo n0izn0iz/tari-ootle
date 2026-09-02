@@ -911,12 +911,79 @@ mod resource_access_rules {
         );
     }
 
-    // NOTE: there is no regression test yet for the auth-hook caller-identity transfer. When a
-    // resource action triggers a hook via `invoke_resource_access_hook`, the hook's method observes
-    // the acting component as its caller (the acting component's frame is still on top when the hook
-    // frame is pushed), which makes `caller_component`/`caller_template` usable in the hook path. A
-    // test would need an external actor component acting on an attacker-authored resource, since the
-    // hook is skipped when a component acts on its own resource.
+    // The auth-hook path transfers the acting component's identity to the hook method's caller. The
+    // hook component is created by `AccessRulesTest::with_auth_hook_gated_on_caller`, whose
+    // `caller_gated_hook` method is gated on `caller_component(hook_caller)`. A built-in account acting
+    // on the resource (via `deposit`) is the caller the hook observes, even though the account's code
+    // never invoked the hook.
+    #[test]
+    fn it_transfers_caller_identity_through_auth_hook() {
+        let mut test = TemplateTest::new(CRATE_PATH, ["tests/templates/access_rules"]);
+
+        let (actor_account, actor_proof, actor_key) = test.create_empty_account();
+
+        let access_rules_template = test.get_template_address("AccessRulesTest");
+
+        let result = test.execute_expect_success(
+            Transaction::builder_localnet(Epoch(1))
+                .call_function(access_rules_template, "with_auth_hook_gated_on_caller", args![
+                    actor_account
+                ])
+                .build_and_seal(&actor_key),
+            vec![actor_proof.clone()],
+        );
+
+        let component_address = result.finalize.execution_results[0]
+            .decode::<ComponentAddress>()
+            .unwrap();
+
+        // `take_tokens` withdraws into the workspace (the hook is skipped for the component's own
+        // resource), then `actor_account.deposit` triggers the hook. The deposit only succeeds if the
+        // hook observes `actor_account` as its caller.
+        test.execute_expect_success(
+            Transaction::builder_localnet(Epoch(1))
+                .call_method(component_address, "take_tokens", args![10])
+                .put_last_instruction_output_on_workspace("tokens")
+                .call_method(actor_account, "deposit", args![Workspace("tokens")])
+                .build_and_seal(&actor_key),
+            vec![actor_proof],
+        );
+    }
+
+    #[test]
+    fn it_denies_auth_hook_when_acting_caller_is_not_gated() {
+        let mut test = TemplateTest::new(CRATE_PATH, ["tests/templates/access_rules"]);
+
+        let (gated_account, gated_proof, gated_key) = test.create_empty_account();
+        let (other_account, other_proof, other_key) = test.create_empty_account();
+
+        let access_rules_template = test.get_template_address("AccessRulesTest");
+
+        let result = test.execute_expect_success(
+            Transaction::builder_localnet(Epoch(1))
+                .call_function(access_rules_template, "with_auth_hook_gated_on_caller", args![
+                    gated_account
+                ])
+                .build_and_seal(&gated_key),
+            vec![gated_proof],
+        );
+
+        let component_address = result.finalize.execution_results[0]
+            .decode::<ComponentAddress>()
+            .unwrap();
+
+        let result = test.execute_expect_failure(
+            Transaction::builder_localnet(Epoch(1))
+                .call_method(component_address, "take_tokens", args![10])
+                .put_last_instruction_output_on_workspace("tokens")
+                .call_method(other_account, "deposit", args![Workspace("tokens")])
+                .build_and_seal(&other_key),
+            vec![other_proof],
+        );
+
+        assert_reject_reason(result, "Resource Auth Hook Denied Access");
+    }
+
     #[test]
     fn it_allows_resource_actions_if_auth_hook_passes() {
         let mut test = TemplateTest::new(CRATE_PATH, ["tests/templates/access_rules"]);

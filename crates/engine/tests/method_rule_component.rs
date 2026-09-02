@@ -147,3 +147,41 @@ fn caller_component_rule_denies_a_top_level_signer() {
         },
     });
 }
+
+/// `OwnerRule::ByAccessRule(rule!(caller_component(addr)))` must be evaluated against the caller, not
+/// the callee. The gated caller is the owner and can call a `deny_all` method via the ownership
+/// short-circuit; a top-level signer is not the owner and is denied by the method rule.
+#[test]
+fn caller_component_owner_rule_short_circuits_only_for_the_caller() {
+    let mut test = TemplateTest::new(CRATE_PATH, [
+        "tests/templates/caller_component_caller",
+        "tests/templates/caller_component_callee",
+    ]);
+
+    let caller: ComponentAddress = test.call_function("Caller", "new", args![], vec![test.owner_proof()]);
+    let callee: ComponentAddress =
+        test.call_function("Callee", "new_owner_gated", args![caller], vec![test.owner_proof()]);
+
+    // The owner component can call `bar` even though its method rule is the default `deny_all`.
+    test.execute_expect_success(
+        test.transaction()
+            .call_method(caller, "call_bar", args![callee])
+            .build_and_seal(test.secret_key()),
+        vec![test.owner_proof()],
+    );
+
+    // A top-level signer is not the owner, so the ownership check does not short-circuit and the
+    // default `deny_all` method rule rejects the call.
+    let reason = test.execute_expect_failure(
+        test.transaction()
+            .call_method(callee, "bar", args![])
+            .build_and_seal(test.secret_key()),
+        vec![test.owner_proof()],
+    );
+    assert_reject_reason(reason, RuntimeError::AccessDenied {
+        action_ident: ActionIdent::ComponentCallMethod {
+            component_address: callee,
+            method: "bar".to_string(),
+        },
+    });
+}

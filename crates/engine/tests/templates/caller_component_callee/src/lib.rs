@@ -39,6 +39,20 @@ mod callee {
                 .create()
         }
 
+        pub fn new_owner_gated(gate: ComponentAddress) -> Component<Self> {
+            // Ownership is gated on the caller component, while `bar` is left under the default
+            // `deny_all`. Only the owner (the gated caller) can reach `bar` via the ownership
+            // short-circuit; everyone else is denied by the method rule.
+            let access_rules = ComponentAccessRules::new()
+                .method("ping", rule!(allow_all))
+                .default(rule!(deny_all));
+
+            Component::new(Callee)
+                .with_access_rules(access_rules)
+                .with_owner_rule(OwnerRule::ByAccessRule(rule!(caller_component(gate))))
+                .create()
+        }
+
         pub fn bar(&self) {}
 
         pub fn ping(&self) -> u64 {
