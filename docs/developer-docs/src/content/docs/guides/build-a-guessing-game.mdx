@@ -3,14 +3,13 @@ title: Building a Guessing Game Template
 description: Build a simple guessing game template to learn important concepts of writing Tari Ootle Templates.
 ---
 
-import Emgithub from "../../../components/Emgithub.astro";
-import { basePath } from "../../../helpers/path";
+import Emgithub from '../../../components/Emgithub.astro';
+import { basePath } from '../../../helpers/path';
 import { Aside } from "@astrojs/starlight/components";
 
 ### Covered in this guide
 
 In this guide, you will:
-
 - Create a new Tari Ootle template crate using `cargo-generate`.
 - Design and implement the state and logic for a decentralized guessing game.
 - Understand how to create and manage resources.
@@ -54,7 +53,6 @@ cargo generate https://github.com/tari-project/wasm-template wasm_templates/empt
 This generates a new Rust library crate with the bare-bones structure and dependencies to start building your template.
 
 You should have a new directory called `guessing_game` with the following structure:
-
 ```
 guessing_game
 ├── Cargo.toml <-- dependencies
@@ -63,9 +61,7 @@ guessing_game
 └── tests
     └── test.rs <-- unit tests for your template go here
 ```
-
 To check that everything works, you can run the tests with `cargo test`:
-
 ```
 (snip .. a lot of compilation output)
 
@@ -76,7 +72,6 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```
 
 **What we did:**
-
 - We used `cargo-generate` to create a new starter Rust crate for our template.
 - Ran a test that invokes your (empty) template function
 
@@ -136,10 +131,10 @@ pub struct Guess {
 ```
 
 <Aside type="tip">
-  Putting the struct inside the `template` module (annotated with the `#[template]` attribute) automatically derives the
-  required CBOR encoding (`minicbor::Encode`, `minicbor::Decode` and `minicbor::CborLen`) and tags each field for you.
-  You can also put it outside the module and add `#[derive(minicbor::Encode, minicbor::Decode, minicbor::CborLen)]` —
-  tagging each field with `#[n(N)]` — to achieve the same effect. You would need to add the `minicbor` crate as a
+  Putting the struct inside the `template` module (annotated with the `#[template]` attribute) automatically derives
+  the required CBOR encoding (`minicbor::Encode`, `minicbor::Decode` and `minicbor::CborLen`) and tags each field for
+  you. You can also put it outside the module and add `#[derive(minicbor::Encode, minicbor::Decode, minicbor::CborLen)]`
+  — tagging each field with `#[n(N)]` — to achieve the same effect. You would need to add the `minicbor` crate as a
   dependency in your `Cargo.toml` to do that.
 </Aside>
 
@@ -166,8 +161,8 @@ impl GuessingGame {
 ```
 
 <Aside type="tip">
-  The `Vault` returned from `Vault::new_empty` is a reference to the on-chain vault substate. You MUST store the vault
-  in a component before the end of the function, or the transaction will fail.
+  The `Vault` returned from `Vault::new_empty` is a reference to the on-chain vault substate.
+  You MUST store the vault in a component before the end of the function, or the transaction will fail.
 </Aside>
 
 **What we did:**
@@ -186,7 +181,6 @@ is native to Tari Ootle and behaves like an object or currency.
 That is, it can be minted, transferred, but not copied or unintentionally destroyed.
 
 There are 3 types of resource:
-
 - fungible stealth resources are private and enable "blinded" UTXO substates which hide the amount and the owner on-chain.
 - public fungible resources are like ERC-20 tokens, where each token is identical and divisible. Visible on-chain with transparent amounts and addresses.
 - non-fungible resources are like ERC-721 tokens, where each token is unique and indivisible. Visible on-chain with transparent metadata and ownership.
@@ -231,17 +225,16 @@ impl GuessingGame {
   resource that we can use to mint new NFTs later. We pass the `ResourceAddress` to the vault to specify what type
   of resource it holds.
 
-You can also use the `initial_supply(...)` method to mint NFTs as part of the resource creation process.
-`initial_supply` returns a `Bucket` containing the newly minted NFTs, which you can then deposit into the vault using
-`Vault::from_bucket`.
-
+  You can also use the `initial_supply(...)` method to mint NFTs as part of the resource creation process.
+  `initial_supply` returns a `Bucket` containing the newly minted NFTs, which you can then deposit into the vault using
+  `Vault::from_bucket`.
 </Aside>
 
 <Aside type="tip">
-  By default, only the resource owner can mint new tokens for a resource. You can change this, by setting an access rule
-  (`.mintable(rule![non_fungible(bob)], OWNER)`) but for this example, we only want the owner to mint. The second
-  argument is an [`UpdateRule`] that controls who, if anyone, can later change the mint rule — see the{" "}
-  <a href={basePath("/guides/authorization-and-access/")}>Authorization guide</a> for details.
+  By default, only the resource owner can mint new tokens for a resource. You can change this,
+  by setting an access rule (`.mintable(rule![non_fungible(bob)], OWNER)`) but for this example, we only want the
+  owner to mint. The second argument is an [`UpdateRule`] that controls who, if anyone, can later change the mint
+  rule — see the <a href={basePath("/guides/authorization-and-access/")}>Authorization guide</a> for details.
 </Aside>
 
 <Aside type="note">
@@ -249,8 +242,8 @@ You can also use the `initial_supply(...)` method to mint NFTs as part of the re
   the vault, the transaction will fail.
 </Aside>
 
-**What we did:**
 
+**What we did:**
 - We created a new non-fungible resource that uniquely identifies the prize for our game.
 - We gave it some metadata, including a name and token symbol.
 - We passed the resource address to the vault to specify that it will hold this resource.
@@ -281,14 +274,12 @@ pub fn start_game(&mut self, prize: NonFungibleId) {
 ```
 
 **What we did:**
-
 - We created a `start_game` method that takes a `NonFungibleId` as an argument. This allows the component creator to specify the prize NFT for this round
 - We increment the round number to keep track of which round we're on.
 - We used the `ResourceManager` to mint a new NFT for the prize, with the round number as immutable metadata.
 - We deposited the newly minted prize NFT into the vault to hold it until we determine the winner at the end of the round.
 
 ## Submitting a guess
-
 Next, we need a function that allows players to submit their guesses.
 
 ```rust
@@ -312,7 +303,6 @@ pub fn guess(&mut self, guess: u8, payout_to: ComponentAddress) {
 ```
 
 **What we did:**
-
 - We created a `guess` method that takes a player's guess and the address of the component where they want to receive their payout if they win.
 - We used the `CallerContext::transaction_signer_public_key()` to identify the player making the guess.
 - We stored the player's guess in a hashmap, ensuring that they can only guess once per round.
@@ -356,7 +346,6 @@ Component::new(Self {
 ```
 
 **What we did:**
-
 - We created a `ComponentAccessRules` struct that defines who can call methods on our component.
 - We set the access rule for the `guess` method to `allow_all`, which means that anyone can call it without restriction.
 
@@ -364,12 +353,11 @@ Component::new(Self {
   You don't need to specify access rules for every method. By default, all methods are only callable by the component
   creator. You can override this default by using e.g. `.default(rule![any_of(non_fungible(admin), non_fungible(bob))])`
 
-```rust
-let access_rules = ComponentAccessRules::new()
-.method("im_public", rule![allow_all])
-.default(rule![non_fungible(admin)]); // "admin" is required for all other methods
-```
-
+  ```rust
+  let access_rules = ComponentAccessRules::new()
+  .method("im_public", rule![allow_all])
+  .default(rule![non_fungible(admin)]); // "admin" is required for all other methods
+  ```
 </Aside>
 
 ## Ending the game and awarding the prize
@@ -407,12 +395,11 @@ pub fn end_game_and_payout(&mut self) {
 ```
 
 **What we did:**
-
 - We withdrew the prize from the vault into a bucket
 - We generated a pseudo-random number to compare against the players' guesses.
 - We iterated through the players' guesses to see if any of them matched the generated number.
 - If there was a winner, we used the `ComponentManager` to invoke the `deposit` method on the winner's account
-  with the prize bucket as an argument.
+with the prize bucket as an argument.
 - If there wasn't a winner, we burned the prize to permanently remove it from circulation.
 
 What about generating our random number between 0 and 10?
@@ -439,14 +426,13 @@ fn generate_number() -> u8 {
   The `rand::random_bytes` function returns random but deterministic bytes and should not be used for any use
   cases that require cryptographic security.
 
-The `wasm32-unknown-unknown` target does not have access to a source of entropy (`get_random`) used by crates like
-`rand`. Any decentralized network with smart contracts must ensure that transactions run deterministically on all
-nodes to
-reach consensus, and so by design do not offer "real" randomness.
+  The `wasm32-unknown-unknown` target does not have access to a source of entropy (`get_random`) used by crates like
+  `rand`. Any decentralized network with smart contracts must ensure that transactions run deterministically on all
+  nodes to
+  reach consensus, and so by design do not offer "real" randomness.
 
-`random_bytes` uses the transaction itself and an internal counter as a source of entropy, which can
-be hard to guess (or "mine"⛏️) but not impossible.
-
+  `random_bytes` uses the transaction itself and an internal counter as a source of entropy, which can
+  be hard to guess (or "mine"⛏️) but not impossible.
 </Aside>
 
 ## Testing
@@ -493,17 +479,19 @@ opt-level = 2
 ```
 
 <Aside type="note">
-  The first build after adding these lines will take a bit longer as Cargo recompiles the affected crates with
-  optimizations. Subsequent builds will be fast as usual, and your template tests will run significantly faster.
+  The first build after adding these lines will take a bit longer as Cargo recompiles
+  the affected crates with optimizations. Subsequent builds will be fast as usual, and
+  your template tests will run significantly faster.
 </Aside>
 
 ## Full annotated code
 
 <p>
-  <a href="https://github.com/tari-project/wasm-template/tree/main/examples/guessing_game/template" target="_blank">
-    Guessing Game crate on Github
-  </a>
+  <a href="https://github.com/tari-project/wasm-template/tree/main/examples/guessing_game/template" target="_blank">Guessing
+    Game
+    crate on Github</a>
 </p>
+
 
 Use cargo-generate to download the full template crate:
 

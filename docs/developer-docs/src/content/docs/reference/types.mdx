@@ -2,8 +2,7 @@
 title: Types Reference
 description: Detailed documentation of types in the Tari Ootle Template Library.
 ---
-
-import { basePath } from "../../../helpers/path";
+import { basePath } from '../../../helpers/path';
 
 The `tari_template_lib_types` crate defines a rich set of types that are fundamental to building Tari Ootle Templates. These types are designed to be efficiently serialized and deserialized by the validator engine and provide a safe and structured way to interact with on-chain data.
 
@@ -15,10 +14,9 @@ Many of these types are re-exported through `tari_template_lib::prelude::*`, mak
 
 Represents a quantity of a fungible resource. It is a `u64` wrapper with specialized serialization/deserialization for large numbers and decimal precision (when the `precision` feature is enabled).
 
-- **Purpose:** Used for all fungible token balances, supplies, and transfer amounts.
-- **Usage Example:**
-
-````rust
+-   **Purpose:** Used for all fungible token balances, supplies, and transfer amounts.
+-   **Usage Example:**
+```rust
 use tari_template_lib::prelude::*;
 let amount = Amount(100_000);
 let total_supply = Amount(1_000_000_000);
@@ -111,4 +109,3 @@ Represents an entity that can be granted or denied access. Can be a `ComponentAd
 -   **`Metadata`**: Key-value pairs for attaching arbitrary data to resources or components.
 
 This is not an exhaustive list but covers the most frequently used types. For a complete reference, consult the Rust documentation for the `tari_template_lib_types` crate.
-````
