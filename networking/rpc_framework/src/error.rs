@@ -54,7 +54,7 @@ pub enum RpcError {
     ReplyTimeout,
     #[error("Received an invalid ping response")]
     InvalidPingResponse,
-    #[error("Unexpected ACK response. This is likely because of a previous ACK timeout")]
+    #[error("Received an ACK frame for a request that did not ask for keepalives")]
     UnexpectedAckResponse,
     #[error("Remote peer attempted to send more than {expected} payload chunks")]
     RemotePeerExceededMaxChunkCount { expected: usize },
