@@ -633,7 +633,6 @@ impl ResourceAccessRules {
     /// Replaces the access rule for the specified action without changing its updater rule.
     /// The caller is responsible for verifying that the change is authorized.
     pub fn set_access_rule(&mut self, action: ResourceAuthAction, rule: AccessRule) {
-        Self::assert_no_caller_requirement(&rule);
         match action {
             ResourceAuthAction::Mint => self.mint = rule,
             ResourceAuthAction::Burn => self.burn = rule,
@@ -668,8 +667,12 @@ impl Default for ResourceAccessRules {
 ///
 /// `component(addr)` / `template(addr)` are constant on component **method** rules (they always describe the current
 /// frame, i.e. the callee), and `caller_component(addr)` / `caller_template(addr)` always evaluate to `false` on
-/// **resource** rules; both are rejected at construction. `OwnerRule::ByAccessRule` is evaluated in both contexts, so
-/// those requirements are *not* rejected there — check the [`RuleRequirement`] docs before using them in an owner rule.
+/// **resource** rules; both are rejected at construction by the builder methods. The builder checks are a
+/// template-author lint; the engine additionally rejects `caller_component`/`caller_template` on the dynamic resource
+/// `ResourceAction::UpdateAccessRule` path, but does not re-validate component `SetAccessRules`, so a hand-written or
+/// non-Rust template could still install a constant rule there. `OwnerRule::ByAccessRule` is evaluated in both
+/// contexts, so those requirements are *not* rejected there — check the [`RuleRequirement`] docs before using them in
+/// an owner rule.
 ///
 /// # Examples:
 ///

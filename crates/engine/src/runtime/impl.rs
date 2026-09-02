@@ -1808,6 +1808,13 @@ where
                         })?;
                 let UpdateAccessRuleArg { action, new_rule } = args.assert_one_arg()?;
 
+                if new_rule.contains_caller_component_or_template() {
+                    return Err(RuntimeError::InvalidArgument {
+                        argument: "new_rule",
+                        reason: "caller_component/caller_template cannot be used on a resource access rule".to_string(),
+                    });
+                }
+
                 let resource_lock = self.tracker.write_with(|state_mut| {
                     let resource_lock = state_mut.write_lock_substate(SubstateId::Resource(resource_address))?;
 

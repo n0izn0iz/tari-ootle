@@ -1336,6 +1336,49 @@ mod resource_access_rules {
     }
 
     #[test]
+    fn update_access_rule_rejects_caller_requirement() {
+        let mut test = TemplateTest::new(CRATE_PATH, ["tests/templates/access_rules"]);
+
+        let (owner_proof, _, owner_key) = test.create_owner_proof();
+
+        let access_rules_template = test.get_template_address("AccessRulesTest");
+
+        let result = test.execute_expect_success(
+            Transaction::builder_localnet(Epoch(1))
+                .call_function(access_rules_template, "with_configured_rules", args![
+                    OwnerRule::OwnedBySigner,
+                    ComponentAccessRules::new().default(AccessRule::AllowAll),
+                    ResourceAccessRules::new().mintable(AccessRule::DenyAll, OWNER),
+                    AccessRule::DenyAll,
+                ])
+                .build_and_seal(&owner_key),
+            vec![owner_proof.clone()],
+        );
+
+        let component_address = result.finalize.execution_results[0]
+            .decode::<ComponentAddress>()
+            .unwrap();
+
+        // `update_access_rule` goes through the engine path (not the WASM builder), so it must reject a
+        // caller requirement with a recoverable `InvalidArgument` error rather than asserting/aborting the
+        // node the way a `panic!` in a WASM builder would be unreachable here.
+        let reason = test.execute_expect_failure(
+            Transaction::builder_localnet(Epoch(1))
+                .call_method(component_address, "update_tokens_access_rule", args![
+                    ResourceAuthAction::Mint,
+                    rule!(caller_component(component_address))
+                ])
+                .build_and_seal(&owner_key),
+            vec![owner_proof],
+        );
+
+        assert_reject_reason(reason, RuntimeError::InvalidArgument {
+            argument: "new_rule",
+            reason: "caller_component/caller_template cannot be used on a resource access rule".to_string(),
+        });
+    }
+
+    #[test]
     fn owner_cannot_update_locked_rule() {
         let mut test = TemplateTest::new(CRATE_PATH, ["tests/templates/access_rules"]);
 
