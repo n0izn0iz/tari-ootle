@@ -3708,7 +3708,7 @@ where
             let component = state.get_component(locked)?;
             state
                 .authorization()
-                .require_ownership(action, component.as_ownership())
+                .require_ownership_from_caller(action, component.as_ownership())
         })
     }
 

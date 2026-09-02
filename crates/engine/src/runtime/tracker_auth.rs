@@ -136,6 +136,26 @@ impl<'a, TStore: StateReader> Authorization<'a, TStore> {
         }
         Ok(())
     }
+
+    /// Like [`require_ownership`](Self::require_ownership), but evaluates the ownership rule against
+    /// the caller (the frame below the current one) rather than the current frame. Used by ownership
+    /// checks that run after the callee's frame has already been pushed, such as template migration.
+    pub fn require_ownership_from_caller<A: Into<ActionIdent>>(
+        &self,
+        action: A,
+        ownership: Ownership<'_>,
+    ) -> Result<(), RuntimeError> {
+        let context = RuleContext::Caller(self.state.method_caller());
+        if !check_ownership(
+            self.state,
+            self.state.current_call_scope()?.auth_scope(),
+            ownership,
+            context,
+        )? {
+            return Err(RuntimeError::AccessDeniedOwnerRequired { action: action.into() });
+        }
+        Ok(())
+    }
 }
 
 fn check_ownership<TStore: StateReader>(
