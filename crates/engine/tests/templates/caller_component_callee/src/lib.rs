@@ -13,7 +13,7 @@ mod callee {
     impl Callee {
         pub fn new(gate: ComponentAddress) -> Component<Self> {
             let access_rules = ComponentAccessRules::new()
-                .method("bar", rule!(component(gate)))
+                .method("bar", rule!(caller_component(gate)))
                 .method("ping", rule!(allow_all))
                 .default(rule!(deny_all));
 
@@ -28,7 +28,7 @@ mod callee {
             let allocation = CallerContext::allocate_component_address(None);
             let own_address = allocation.get_address();
             let access_rules = ComponentAccessRules::new()
-                .method("bar", rule!(component(own_address)))
+                .method("bar", rule!(caller_component(own_address)))
                 .method("ping", rule!(allow_all))
                 .default(rule!(deny_all));
 

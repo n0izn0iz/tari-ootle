@@ -1,6 +1,6 @@
 [workspace]
 [package]
-name = "component_rule_caller"
+name = "caller_component_caller"
 version = "0.1.0"
 edition = "2024"
 

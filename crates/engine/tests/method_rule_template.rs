@@ -8,17 +8,13 @@ use tari_template_test_tooling::{TemplateTest, support::assert_error::assert_rej
 
 const CRATE_PATH: &str = env!("CARGO_MANIFEST_DIR");
 
-/// A `rule!(template(addr))` method access rule allows callers from the template whose address is
+/// A `rule!(caller_template(addr))` method access rule allows callers from the template whose address is
 /// `addr`, whether they are a component instance of that template or a static function of it.
-///
-/// The callee's `bar` method is gated with `rule!(template(caller_template))`. These tests invoke
-/// `bar` from (1) a component of the caller template and (2) a static function of the caller
-/// template, and assert both succeed.
 #[test]
-fn template_rule_on_method_allows_a_component_caller() {
+fn caller_template_rule_allows_a_component_caller() {
     let mut test = TemplateTest::new(CRATE_PATH, [
-        "tests/templates/template_rule_caller",
-        "tests/templates/template_rule_callee",
+        "tests/templates/caller_template_caller",
+        "tests/templates/caller_template_callee",
     ]);
 
     // Create the caller component, then the callee gated on the caller's *template* address.
@@ -43,10 +39,10 @@ fn template_rule_on_method_allows_a_component_caller() {
 
 /// A static function of the gated template is allowed (its template matches the gate).
 #[test]
-fn template_rule_on_method_allows_a_static_function_caller() {
+fn caller_template_rule_allows_a_static_function_caller() {
     let mut test = TemplateTest::new(CRATE_PATH, [
-        "tests/templates/template_rule_caller",
-        "tests/templates/template_rule_callee",
+        "tests/templates/caller_template_caller",
+        "tests/templates/caller_template_callee",
     ]);
 
     // Gate the callee's `bar` on the caller's *template* address.
@@ -72,11 +68,11 @@ fn template_rule_on_method_allows_a_static_function_caller() {
 
 /// A caller from a different template must be denied.
 #[test]
-fn template_rule_on_method_denies_a_component_of_another_template() {
+fn caller_template_rule_denies_a_component_of_another_template() {
     let mut test = TemplateTest::new(CRATE_PATH, [
-        "tests/templates/component_rule_caller",
-        "tests/templates/template_rule_caller",
-        "tests/templates/template_rule_callee",
+        "tests/templates/caller_component_caller",
+        "tests/templates/caller_template_caller",
+        "tests/templates/caller_template_callee",
     ]);
 
     // The callee's `bar` is gated on the `TemplateCaller` template.

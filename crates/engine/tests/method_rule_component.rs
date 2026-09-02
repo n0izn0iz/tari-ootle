@@ -8,16 +8,16 @@ use tari_template_test_tooling::{TemplateTest, support::assert_error::assert_rej
 
 const CRATE_PATH: &str = env!("CARGO_MANIFEST_DIR");
 
-/// A `rule!(component(addr))` method access rule allows the component whose address is `addr` to
+/// A `rule!(caller_component(addr))` method access rule allows the component whose address is `addr` to
 /// invoke the method.
 ///
-/// The callee's `bar` method is gated with `rule!(component(caller_address))`. This test invokes
+/// The callee's `bar` method is gated with `rule!(caller_component(caller_address))`. This test invokes
 /// `bar` from exactly that caller component and asserts the call succeeds.
 #[test]
-fn component_rule_on_method_allows_the_caller() {
+fn caller_component_rule_allows_the_caller() {
     let mut test = TemplateTest::new(CRATE_PATH, [
-        "tests/templates/component_rule_caller",
-        "tests/templates/component_rule_callee",
+        "tests/templates/caller_component_caller",
+        "tests/templates/caller_component_callee",
     ]);
 
     // Create the caller component, then the callee gated on the caller's address.
@@ -39,10 +39,10 @@ fn component_rule_on_method_allows_the_caller() {
 
 /// A component whose address is not the gated address must be denied.
 #[test]
-fn component_rule_on_method_denies_an_unrelated_component() {
+fn caller_component_rule_denies_an_unrelated_component() {
     let mut test = TemplateTest::new(CRATE_PATH, [
-        "tests/templates/component_rule_caller",
-        "tests/templates/component_rule_callee",
+        "tests/templates/caller_component_caller",
+        "tests/templates/caller_component_callee",
     ]);
 
     // Two distinct caller components; the callee is gated on only the first.
@@ -73,12 +73,12 @@ fn component_rule_on_method_denies_an_unrelated_component() {
     });
 }
 
-/// A static function has no component identity, so it must never satisfy `rule!(component(addr))`.
+/// A static function has no component identity, so it must never satisfy `rule!(caller_component(addr))`.
 #[test]
-fn component_rule_on_method_denies_a_static_function() {
+fn caller_component_rule_denies_a_static_function() {
     let mut test = TemplateTest::new(CRATE_PATH, [
-        "tests/templates/component_rule_callee",
-        "tests/templates/template_rule_caller",
+        "tests/templates/caller_component_callee",
+        "tests/templates/caller_template_caller",
     ]);
 
     // A concrete component address is used as the gate; the static caller still has no component to match.
@@ -100,13 +100,13 @@ fn component_rule_on_method_denies_a_static_function() {
     });
 }
 
-/// A method gated on the component's own address is still restricted to that component: an intruder
-/// (a different component) must be denied, rather than the gate matching every caller.
+/// A method gated on the component's own address is restricted to that component: a cross-component
+/// intruder must be denied.
 #[test]
-fn component_rule_on_method_denies_an_intruder_when_gated_on_own_address() {
+fn caller_component_rule_denies_an_intruder_when_gated_on_own_address() {
     let mut test = TemplateTest::new(CRATE_PATH, [
-        "tests/templates/component_rule_caller",
-        "tests/templates/component_rule_callee",
+        "tests/templates/caller_component_caller",
+        "tests/templates/caller_component_callee",
     ]);
 
     let callee: ComponentAddress = test.call_function("Callee", "new_self_gated", args![], vec![test.owner_proof()]);
@@ -115,6 +115,28 @@ fn component_rule_on_method_denies_an_intruder_when_gated_on_own_address() {
     let reason = test.execute_expect_failure(
         test.transaction()
             .call_method(intruder, "call_bar", args![callee])
+            .build_and_seal(test.secret_key()),
+        vec![test.owner_proof()],
+    );
+    assert_reject_reason(reason, RuntimeError::AccessDenied {
+        action_ident: ActionIdent::ComponentCallMethod {
+            component_address: callee,
+            method: "bar".to_string(),
+        },
+    });
+}
+
+/// A top-level transaction signer has no component identity, so a direct `CallMethod` of a method gated
+/// on the component's own address must be denied.
+#[test]
+fn caller_component_rule_denies_a_top_level_signer() {
+    let mut test = TemplateTest::new(CRATE_PATH, ["tests/templates/caller_component_callee"]);
+
+    let callee: ComponentAddress = test.call_function("Callee", "new_self_gated", args![], vec![test.owner_proof()]);
+
+    let reason = test.execute_expect_failure(
+        test.transaction()
+            .call_method(callee, "bar", args![])
             .build_and_seal(test.secret_key()),
         vec![test.owner_proof()],
     );

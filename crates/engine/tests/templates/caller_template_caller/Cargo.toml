@@ -1,6 +1,6 @@
 [workspace]
 [package]
-name = "template_rule_caller"
+name = "caller_template_caller"
 version = "0.1.0"
 edition = "2024"
 
