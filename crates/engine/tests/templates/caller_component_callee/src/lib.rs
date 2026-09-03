@@ -55,6 +55,16 @@ mod callee {
 
         pub fn bar(&self) {}
 
+        /// Opens `bar` to everyone. Updating access rules requires ownership of this component.
+        pub fn open_bar(&mut self) {
+            ComponentManager::current().set_access_rules(
+                ComponentAccessRules::new()
+                    .method("bar", rule!(allow_all))
+                    .method("ping", rule!(allow_all))
+                    .default(rule!(deny_all)),
+            );
+        }
+
         pub fn ping(&self) -> u64 {
             42
         }

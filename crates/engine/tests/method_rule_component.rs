@@ -3,7 +3,7 @@
 
 use tari_engine::runtime::{ActionIdent, RuntimeError};
 use tari_ootle_transaction::args;
-use tari_template_lib::types::{ComponentAddress, TemplateAddress};
+use tari_template_lib::types::ComponentAddress;
 use tari_template_test_tooling::{TemplateTest, support::assert_error::assert_reject_reason};
 
 const CRATE_PATH: &str = env!("CARGO_MANIFEST_DIR");
@@ -19,19 +19,20 @@ fn caller_component_rule_allows_the_caller() {
         "tests/templates/caller_component_caller",
         "tests/templates/caller_component_callee",
     ]);
+    let caller_template = test.get_template_address("Caller");
+    let callee_template = test.get_template_address("Callee");
 
-    // Create the caller component, then the callee gated on the caller's address.
-    let caller: ComponentAddress = test.call_function("Caller", "new", args![], vec![test.owner_proof()]);
-    let callee: ComponentAddress = test.call_function("Callee", "new", args![caller], vec![test.owner_proof()]);
-
-    // Control: the caller can invoke the callee's unrestricted method cross-component.
-    let cross_ping: u64 = test.call_method(caller, "call_ping", args![callee], vec![test.owner_proof()]);
-    assert_eq!(cross_ping, 42);
-
-    // The caller is allowed because `bar` is restricted to exactly this caller's address.
+    // Create the caller, then the callee gated on the caller's address. `call_ping` is the control (an
+    // unrestricted cross-component call); `call_bar` is allowed because `bar` is restricted to exactly
+    // this caller's address.
     test.execute_expect_success(
         test.transaction()
-            .call_method(caller, "call_bar", args![callee])
+            .call_function(caller_template, "new", args![])
+            .put_last_instruction_output_on_workspace("caller")
+            .call_function(callee_template, "new", args![Workspace("caller")])
+            .put_last_instruction_output_on_workspace("callee")
+            .call_method("caller", "call_ping", args![Workspace("callee")])
+            .call_method("caller", "call_bar", args![Workspace("callee")])
             .build_and_seal(test.secret_key()),
         vec![test.owner_proof()],
     );
@@ -44,21 +45,28 @@ fn caller_component_rule_denies_an_unrelated_component() {
         "tests/templates/caller_component_caller",
         "tests/templates/caller_component_callee",
     ]);
+    let caller_template = test.get_template_address("Caller");
+    let callee_template = test.get_template_address("Callee");
 
-    // Two distinct caller components; the callee is gated on only the first.
-    let allowed: ComponentAddress = test.call_function("Caller", "new", args![], vec![test.owner_proof()]);
-    let intruder: ComponentAddress = test.call_function("Caller", "new", args![], vec![test.owner_proof()]);
-    let callee: ComponentAddress = test.call_function("Callee", "new", args![allowed], vec![test.owner_proof()]);
-
-    // Sanity: the allowed caller can invoke `bar`.
+    // The callee is gated on the caller created alongside it, which can invoke `bar`.
     test.execute_expect_success(
         test.transaction()
-            .call_method(allowed, "call_bar", args![callee])
+            .call_function(caller_template, "new", args![])
+            .put_last_instruction_output_on_workspace("allowed")
+            .call_function(callee_template, "new", args![Workspace("allowed")])
+            .put_last_instruction_output_on_workspace("callee")
+            .call_method("allowed", "call_bar", args![Workspace("callee")])
             .build_and_seal(test.secret_key()),
         vec![test.owner_proof()],
     );
+    let callee = test
+        .read_only_state_store()
+        .get_first_component_of(callee_template)
+        .unwrap()
+        .unwrap();
 
-    // The intruder is a different component instance, so it must be denied.
+    // The intruder is a different instance of the same template, so it must be denied.
+    let intruder: ComponentAddress = test.call_function("Caller", "new", args![], vec![test.owner_proof()]);
     let reason = test.execute_expect_failure(
         test.transaction()
             .call_method(intruder, "call_bar", args![callee])
@@ -80,12 +88,24 @@ fn caller_component_rule_denies_a_static_function() {
         "tests/templates/caller_component_callee",
         "tests/templates/caller_template_caller",
     ]);
+    let caller_template = test.get_template_address("TemplateCaller");
+    let callee_template = test.get_template_address("Callee");
 
     // A concrete component address is used as the gate; the static caller still has no component to match.
-    let gate: ComponentAddress = test.call_function("TemplateCaller", "new", args![], vec![test.owner_proof()]);
-    let callee: ComponentAddress = test.call_function("Callee", "new", args![gate], vec![test.owner_proof()]);
+    test.execute_expect_success(
+        test.transaction()
+            .call_function(caller_template, "new", args![])
+            .put_last_instruction_output_on_workspace("gate")
+            .call_function(callee_template, "new", args![Workspace("gate")])
+            .build_and_seal(test.secret_key()),
+        vec![test.owner_proof()],
+    );
+    let callee = test
+        .read_only_state_store()
+        .get_first_component_of(callee_template)
+        .unwrap()
+        .unwrap();
 
-    let caller_template: TemplateAddress = test.get_template_address("TemplateCaller");
     let reason = test.execute_expect_failure(
         test.transaction()
             .call_function(caller_template, "call_bar_static", args![callee])
@@ -108,9 +128,26 @@ fn caller_component_rule_denies_an_intruder_when_gated_on_own_address() {
         "tests/templates/caller_component_caller",
         "tests/templates/caller_component_callee",
     ]);
+    let caller_template = test.get_template_address("Caller");
+    let callee_template = test.get_template_address("Callee");
 
-    let callee: ComponentAddress = test.call_function("Callee", "new_self_gated", args![], vec![test.owner_proof()]);
-    let intruder: ComponentAddress = test.call_function("Caller", "new", args![], vec![test.owner_proof()]);
+    test.execute_expect_success(
+        test.transaction()
+            .call_function(callee_template, "new_self_gated", args![])
+            .call_function(caller_template, "new", args![])
+            .build_and_seal(test.secret_key()),
+        vec![test.owner_proof()],
+    );
+    let callee = test
+        .read_only_state_store()
+        .get_first_component_of(callee_template)
+        .unwrap()
+        .unwrap();
+    let intruder = test
+        .read_only_state_store()
+        .get_first_component_of(caller_template)
+        .unwrap()
+        .unwrap();
 
     let reason = test.execute_expect_failure(
         test.transaction()
@@ -157,18 +194,25 @@ fn caller_component_owner_rule_short_circuits_only_for_the_caller() {
         "tests/templates/caller_component_caller",
         "tests/templates/caller_component_callee",
     ]);
-
-    let caller: ComponentAddress = test.call_function("Caller", "new", args![], vec![test.owner_proof()]);
-    let callee: ComponentAddress =
-        test.call_function("Callee", "new_owner_gated", args![caller], vec![test.owner_proof()]);
+    let caller_template = test.get_template_address("Caller");
+    let callee_template = test.get_template_address("Callee");
 
     // The owner component can call `bar` even though its method rule is the default `deny_all`.
     test.execute_expect_success(
         test.transaction()
-            .call_method(caller, "call_bar", args![callee])
+            .call_function(caller_template, "new", args![])
+            .put_last_instruction_output_on_workspace("caller")
+            .call_function(callee_template, "new_owner_gated", args![Workspace("caller")])
+            .put_last_instruction_output_on_workspace("callee")
+            .call_method("caller", "call_bar", args![Workspace("callee")])
             .build_and_seal(test.secret_key()),
         vec![test.owner_proof()],
     );
+    let callee = test
+        .read_only_state_store()
+        .get_first_component_of(callee_template)
+        .unwrap()
+        .unwrap();
 
     // A top-level signer is not the owner, so the ownership check does not short-circuit and the
     // default `deny_all` method rule rejects the call.
@@ -184,4 +228,29 @@ fn caller_component_owner_rule_short_circuits_only_for_the_caller() {
             method: "bar".to_string(),
         },
     });
+}
+
+/// A component owned via `caller_component` can update its own access rules when invoked by that owner:
+/// the `SetAccessRules` ownership check evaluates the same caller as the method gate.
+#[test]
+fn caller_component_owner_can_update_access_rules() {
+    let mut test = TemplateTest::new(CRATE_PATH, [
+        "tests/templates/caller_component_caller",
+        "tests/templates/caller_component_callee",
+    ]);
+    let caller_template = test.get_template_address("Caller");
+    let callee_template = test.get_template_address("Callee");
+
+    // The owner opens `bar` to everyone, after which a top-level signer can call it directly.
+    test.execute_expect_success(
+        test.transaction()
+            .call_function(caller_template, "new", args![])
+            .put_last_instruction_output_on_workspace("caller")
+            .call_function(callee_template, "new_owner_gated", args![Workspace("caller")])
+            .put_last_instruction_output_on_workspace("callee")
+            .call_method("caller", "call_open_bar", args![Workspace("callee")])
+            .call_method("callee", "bar", args![])
+            .build_and_seal(test.secret_key()),
+        vec![test.owner_proof()],
+    );
 }

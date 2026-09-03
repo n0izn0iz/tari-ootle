@@ -98,6 +98,10 @@ trustworthy as the code that makes the call. A method that forwards a caller-sup
 method (a "proxy" method) delegates that identity, so anyone who can call the proxy can act as the proxied
 caller.
 
+The same applies to resource auth hooks: the engine invokes the hook with the acting component as the
+caller, and any resource may bind any hook-shaped method. A caller gate on a hook method is therefore never
+sufficient on its own; the hook must check `AuthHookCaller::resource()` against the resources it manages.
+
 #### Resource Access Rules
 
 Resources can also have access rules, typically governing who can mint, burn, recall, freeze, or update metadata.

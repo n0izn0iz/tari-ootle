@@ -427,6 +427,19 @@ impl<TStore: StateReader + Clone + 'static, TTemplateProvider: TemplateProvider<
             auth_caller.with_component_state(caller.into_component().state);
         }
 
+        // The hook frame only accepts the `AuthHookCaller` argument if the resource it names is in the acting
+        // frame's scope. The reference is scoped to the hook call: the acting frame's scope must be the same after
+        // the hook as before it, whether or not the resource has a hook.
+        let resource_id: SubstateId = (*auth_caller.resource()).into();
+        let resource_was_in_scope = self.tracker.write_with(|state_mut| {
+            let scope = state_mut.current_call_scope_mut()?;
+            let was_in_scope = scope.is_substate_in_scope(&resource_id);
+            if !was_in_scope {
+                scope.add_substate_to_referenced(resource_id.clone());
+            }
+            Ok::<_, RuntimeError>(was_in_scope)
+        })?;
+
         // The signature of a call back is (action: ResourceAuthAction, auth_caller: AuthHookCaller)
         let ret = self
             .invoke_component_method(auth_hook.component_address, &auth_hook.method, invoke_args![
@@ -446,6 +459,15 @@ impl<TStore: StateReader + Clone + 'static, TTemplateProvider: TemplateProvider<
         // `Value::Array([])` (minicbor encoding of `()`).
         if !ret.indexed.value().is_unit() {
             return Err(RuntimeError::UnexpectedNonNullInAuthHookReturn);
+        }
+
+        if !resource_was_in_scope {
+            self.tracker.write_with(|state_mut| {
+                state_mut
+                    .current_call_scope_mut()?
+                    .remove_substate_from_referenced(&resource_id);
+                Ok::<_, RuntimeError>(())
+            })?;
         }
         Ok(())
     }
@@ -1212,6 +1234,24 @@ where
                 let template_def = self.get_template_def(&template_addr)?;
                 validate_component_access_rule_methods(&access_rules, &template_def)?;
 
+                if access_rules.contains_scoped_to_component_or_template() {
+                    return Err(RuntimeError::InvalidArgument {
+                        argument: "access_rules",
+                        reason: "component(..)/template(..) cannot be used on a component method access rule"
+                            .to_string(),
+                    });
+                }
+                // A component owner rule is only ever evaluated with the component's own frame on top, so
+                // `component(..)`/`template(..)` would be constant (true for the component's own address).
+                if let OwnerRule::ByAccessRule(rule) = &owner_rule &&
+                    rule.contains_scoped_to_component_or_template()
+                {
+                    return Err(RuntimeError::InvalidArgument {
+                        argument: "owner_rule",
+                        reason: "component(..)/template(..) cannot be used in a component owner rule".to_string(),
+                    });
+                }
+
                 let owner_rule = match owner_rule {
                     OwnerRule::OwnedBySigner => SubstateOwnerRule::ByPublicKey(self.seal_signer_public_key),
                     OwnerRule::None => SubstateOwnerRule::None,
@@ -1348,7 +1388,7 @@ where
                     let component = state.get_component(&component_lock)?;
                     state
                         .authorization()
-                        .require_ownership(ComponentAction::SetAccessRules, component.as_ownership())?;
+                        .require_component_ownership(ComponentAction::SetAccessRules, component.as_ownership())?;
 
                     state.modify_component_with(&component_lock, |component| {
                         if access_rules == *component.access_rules() {
@@ -1618,7 +1658,7 @@ where
                             resource.access_rules(),
                         )?;
 
-                        let auth_caller = state_mut.get_auth_caller()?;
+                        let auth_caller = state_mut.get_auth_caller(&resource_lock)?;
                         let has_view_key = resource.view_key().is_some();
                         let tracks_supply = resource.is_supply_tracking_enabled();
                         Ok::<_, RuntimeError>((
@@ -1679,7 +1719,7 @@ where
                     )?;
 
                     let auth_hook = resource.auth_hook().cloned();
-                    let auth_caller = state_mut.get_auth_caller()?;
+                    let auth_caller = state_mut.get_auth_caller(&resource_lock)?;
 
                     state_mut.unlock_substate(resource_lock)?;
                     Ok::<_, RuntimeError>((auth_hook, auth_caller))
@@ -1763,7 +1803,7 @@ where
                     )?;
 
                     let auth_hook = resource.auth_hook().cloned();
-                    let auth_caller = state_mut.get_auth_caller()?;
+                    let auth_caller = state_mut.get_auth_caller(&resource_lock)?;
 
                     state_mut.unlock_substate(resource_lock)?;
                     Ok::<_, RuntimeError>((auth_hook, auth_caller))
@@ -1831,7 +1871,9 @@ where
 
                     let authorized = match updater {
                         UpdateRule::Locked => false,
-                        UpdateRule::Owner => state_mut.authorization().check_ownership(resource.as_ownership())?,
+                        UpdateRule::Owner => state_mut
+                            .authorization()
+                            .check_ownership_in_current_frame(resource.as_ownership())?,
                         UpdateRule::AccessRule(rule) => state_mut.authorization().check_access_rule(rule)?,
                     };
 
@@ -1891,7 +1933,7 @@ where
                         });
                     }
 
-                    let auth_caller = state_mut.get_auth_caller()?;
+                    let auth_caller = state_mut.get_auth_caller(&resource_lock)?;
                     Ok::<_, RuntimeError>((resource_lock, resource.auth_hook().cloned(), auth_caller))
                 })?;
 
@@ -1943,7 +1985,7 @@ where
                     )?;
 
                     let auth_hook = resource.auth_hook().cloned();
-                    let auth_caller = state_mut.get_auth_caller()?;
+                    let auth_caller = state_mut.get_auth_caller(&resource_lock)?;
 
                     state_mut.unlock_substate(resource_lock)?;
                     Ok::<_, RuntimeError>((auth_hook, auth_caller))
@@ -2325,7 +2367,7 @@ where
                             resource.access_rules(),
                         )?;
 
-                        let auth_caller = state_mut.get_auth_caller()?;
+                        let auth_caller = state_mut.get_auth_caller(&resource_lock)?;
                         Ok::<_, RuntimeError>((vault_lock, resource_lock, resource.auth_hook().cloned(), auth_caller))
                     })?;
 
@@ -2392,7 +2434,7 @@ where
                             resource.access_rules(),
                         )?;
 
-                        let auth_caller = state_mut.get_auth_caller()?;
+                        let auth_caller = state_mut.get_auth_caller(&resource_lock)?;
                         let has_view_key = resource.view_key().is_some();
                         Ok::<_, RuntimeError>((
                             vault_lock,
@@ -2679,7 +2721,7 @@ where
                             resource.access_rules(),
                         )?;
 
-                        let auth_caller = state_mut.get_auth_caller()?;
+                        let auth_caller = state_mut.get_auth_caller(&resource_lock)?;
                         Ok::<_, RuntimeError>((vault_lock, resource_lock, resource.auth_hook().cloned(), auth_caller))
                     })?;
 
@@ -2729,7 +2771,7 @@ where
                             resource.access_rules(),
                         )?;
 
-                        let auth_caller = state_mut.get_auth_caller()?;
+                        let auth_caller = state_mut.get_auth_caller(&resource_lock)?;
                         Ok::<_, RuntimeError>((vault_lock, resource_lock, resource.auth_hook().cloned(), auth_caller))
                     })?;
 
@@ -2779,7 +2821,7 @@ where
                             resource.access_rules(),
                         )?;
 
-                        let auth_caller = state_mut.get_auth_caller()?;
+                        let auth_caller = state_mut.get_auth_caller(&resource_lock)?;
                         Ok::<_, RuntimeError>((vault_lock, resource_lock, resource.auth_hook().cloned(), auth_caller))
                     })?;
 
@@ -3004,7 +3046,7 @@ where
                             resource.access_rules(),
                         )?;
 
-                        let auth_caller = state_mut.get_auth_caller()?;
+                        let auth_caller = state_mut.get_auth_caller(&resource_lock)?;
                         Ok::<_, RuntimeError>((
                             resource_lock,
                             resource.auth_hook().cloned(),
@@ -3075,7 +3117,7 @@ where
                     )?;
 
                     let auth_hook = resource.auth_hook().cloned();
-                    let auth_caller = state_mut.get_auth_caller()?;
+                    let auth_caller = state_mut.get_auth_caller(&resource_lock)?;
 
                     state_mut.unlock_substate(resource_lock)?;
                     Ok::<_, RuntimeError>((auth_hook, auth_caller))
@@ -3723,7 +3765,7 @@ where
             let component = state.get_component(locked)?;
             state
                 .authorization()
-                .require_ownership_from_caller(action, component.as_ownership())
+                .require_component_ownership(action, component.as_ownership())
         })
     }
 

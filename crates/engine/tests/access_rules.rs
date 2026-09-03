@@ -266,6 +266,49 @@ mod component_access_rules {
         });
     }
 
+    #[test]
+    fn create_component_rejects_scoped_owner_rule() {
+        let mut test = TemplateTest::new(CRATE_PATH, ["tests/templates/access_rules"]);
+
+        let (owner_proof, _, owner_key) = test.create_owner_proof();
+
+        let access_rules_template = test.get_template_address("AccessRulesTest");
+
+        let result = test.execute_expect_success(
+            Transaction::builder_localnet(Epoch(1))
+                .call_function(access_rules_template, "with_configured_rules", args![
+                    OwnerRule::OwnedBySigner,
+                    ComponentAccessRules::new().default(AccessRule::AllowAll),
+                    ResourceAccessRules::new(),
+                    AccessRule::DenyAll,
+                ])
+                .build_and_seal(&owner_key),
+            vec![owner_proof.clone()],
+        );
+        let some_component = result.finalize.execution_results[0]
+            .decode::<ComponentAddress>()
+            .unwrap();
+
+        // A `component(..)` owner rule is constant on a component (its own frame is always on top), so the
+        // engine rejects it at creation rather than installing an "owned by everyone" rule.
+        let reason = test.execute_expect_failure(
+            Transaction::builder_localnet(Epoch(1))
+                .call_function(access_rules_template, "with_configured_rules", args![
+                    OwnerRule::ByAccessRule(rule!(component(some_component))),
+                    ComponentAccessRules::new().default(AccessRule::AllowAll),
+                    ResourceAccessRules::new(),
+                    AccessRule::DenyAll,
+                ])
+                .build_and_seal(&owner_key),
+            vec![owner_proof],
+        );
+
+        assert_reject_reason(reason, RuntimeError::InvalidArgument {
+            argument: "owner_rule",
+            reason: "component(..)/template(..) cannot be used in a component owner rule".to_string(),
+        });
+    }
+
     fn component_access_rules_with_scoped_method_rule(component: ComponentAddress) -> ComponentAccessRules {
         use tari_bor::minicbor::{Encode, Encoder};
 
@@ -983,6 +1026,11 @@ mod resource_access_rules {
     // `caller_gated_hook` method is gated on `caller_component(hook_caller)`. A built-in account acting
     // on the resource (via `deposit`) is the caller the hook observes, even though the account's code
     // never invoked the hook.
+    //
+    // Because any resource may bind the hook, the caller gate is satisfied whenever the gated account
+    // acts on *any* such resource. The hook body must therefore check `AuthHookCaller::resource`
+    // against the resources it manages; `caller_gated_hook` does, and that check is mandatory, not
+    // optional.
     #[test]
     fn it_transfers_caller_identity_through_auth_hook() {
         let mut test = TemplateTest::new(CRATE_PATH, ["tests/templates/access_rules"]);
@@ -991,25 +1039,16 @@ mod resource_access_rules {
 
         let access_rules_template = test.get_template_address("AccessRulesTest");
 
-        let result = test.execute_expect_success(
-            Transaction::builder_localnet(Epoch(1))
-                .call_function(access_rules_template, "with_auth_hook_gated_on_caller", args![
-                    actor_account
-                ])
-                .build_and_seal(&actor_key),
-            vec![actor_proof.clone()],
-        );
-
-        let component_address = result.finalize.execution_results[0]
-            .decode::<ComponentAddress>()
-            .unwrap();
-
         // `take_tokens` withdraws into the workspace (the hook is skipped for the component's own
         // resource), then `actor_account.deposit` triggers the hook. The deposit only succeeds if the
         // hook observes `actor_account` as its caller.
         test.execute_expect_success(
             Transaction::builder_localnet(Epoch(1))
-                .call_method(component_address, "take_tokens", args![10])
+                .call_function(access_rules_template, "with_auth_hook_gated_on_caller", args![
+                    actor_account
+                ])
+                .put_last_instruction_output_on_workspace("hook")
+                .call_method("hook", "take_tokens", args![10])
                 .put_last_instruction_output_on_workspace("tokens")
                 .call_method(actor_account, "deposit", args![Workspace("tokens")])
                 .build_and_seal(&actor_key),

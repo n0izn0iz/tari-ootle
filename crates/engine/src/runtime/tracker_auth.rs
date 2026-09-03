@@ -115,32 +115,31 @@ impl<'a, TStore: StateReader> Authorization<'a, TStore> {
         check_access_rule(self.state, scope, rule, RuleContext::CurrentFrame)
     }
 
-    /// Returns `true` if the current call scope satisfies the given ownership rule.
-    pub fn check_ownership(&self, ownership: Ownership<'_>) -> Result<bool, RuntimeError> {
+    /// Returns `true` if the current frame satisfies the ownership rule of a non-component substate
+    /// (resource, fee pool). The current frame is the actor for these substates.
+    pub fn check_ownership_in_current_frame(&self, ownership: Ownership<'_>) -> Result<bool, RuntimeError> {
         let scope = self.state.current_call_scope()?.auth_scope();
         check_ownership(self.state, scope, ownership, RuleContext::CurrentFrame)
     }
 
-    pub fn require_ownership<A: Into<ActionIdent>>(
+    /// Requires that the current frame satisfies the ownership rule of a non-component substate
+    /// (resource, fee pool). Component ownership must use
+    /// [`require_component_ownership`](Self::require_component_ownership).
+    pub fn require_ownership_in_current_frame<A: Into<ActionIdent>>(
         &self,
         action: A,
         ownership: Ownership<'_>,
     ) -> Result<(), RuntimeError> {
-        if !check_ownership(
-            self.state,
-            self.state.current_call_scope()?.auth_scope(),
-            ownership,
-            RuleContext::CurrentFrame,
-        )? {
+        if !self.check_ownership_in_current_frame(ownership)? {
             return Err(RuntimeError::AccessDeniedOwnerRequired { action: action.into() });
         }
         Ok(())
     }
 
-    /// Like [`require_ownership`](Self::require_ownership), but evaluates the ownership rule against
-    /// the caller (the frame below the current one) rather than the current frame. Used by ownership
-    /// checks that run after the callee's frame has already been pushed, such as template migration.
-    pub fn require_ownership_from_caller<A: Into<ActionIdent>>(
+    /// Requires that the caller of the current component satisfies the component's ownership rule. A component
+    /// ownership rule is always evaluated against the caller (the frame below the current one), because every
+    /// component action runs with the component's own frame already on top of the stack.
+    pub fn require_component_ownership<A: Into<ActionIdent>>(
         &self,
         action: A,
         ownership: Ownership<'_>,

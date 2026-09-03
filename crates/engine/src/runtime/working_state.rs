@@ -1275,7 +1275,7 @@ impl<TStore: StateReader> WorkingState<TStore> {
                 })?;
 
             self.authorization()
-                .require_ownership(NativeAction::WithdrawValidatorFunds, fee_pool.as_ownership())?;
+                .require_ownership_in_current_frame(NativeAction::WithdrawValidatorFunds, fee_pool.as_ownership())?;
         }
 
         let pool_mut = self
@@ -1518,7 +1518,15 @@ impl<TStore: StateReader> WorkingState<TStore> {
         Some(MethodCaller { component, template })
     }
 
-    pub fn get_auth_caller(&self) -> Result<AuthHookCaller, RuntimeError> {
+    pub fn get_auth_caller(&self, resource_lock: &LockedSubstate) -> Result<AuthHookCaller, RuntimeError> {
+        let resource_address =
+            resource_lock
+                .substate_id()
+                .as_resource_address()
+                .ok_or_else(|| RuntimeError::InvariantError {
+                    function: "get_auth_caller",
+                    details: format!("Expected a resource lock, got {}", resource_lock.substate_id()),
+                })?;
         let frame = self.call_frames.last().ok_or(RuntimeError::NoActiveCallFrame)?;
         let template = frame.current_template();
         let component = frame
@@ -1526,7 +1534,7 @@ impl<TStore: StateReader> WorkingState<TStore> {
             .get_current_component_lock()
             .and_then(|lock| lock.substate_id().as_component_address());
 
-        Ok(AuthHookCaller::new(*template, component))
+        Ok(AuthHookCaller::new(resource_address, *template, component))
     }
 
     pub fn push_frame(&mut self, mut new_frame: CallFrame, max_call_depth: usize) -> Result<(), RuntimeError> {

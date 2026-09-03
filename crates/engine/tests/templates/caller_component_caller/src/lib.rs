@@ -15,6 +15,7 @@ mod caller {
             let access_rules = ComponentAccessRules::new()
                 .method("call_bar", rule!(allow_all))
                 .method("call_ping", rule!(allow_all))
+                .method("call_open_bar", rule!(allow_all))
                 .default(rule!(deny_all));
 
             Component::new(Caller)
@@ -25,6 +26,10 @@ mod caller {
 
         pub fn call_bar(&self, callee: ComponentAddress) {
             ComponentManager::get(callee).invoke("bar", args![]);
+        }
+
+        pub fn call_open_bar(&self, callee: ComponentAddress) {
+            ComponentManager::get(callee).invoke("open_bar", args![]);
         }
 
         pub fn call_ping(&self, callee: ComponentAddress) -> u64 {

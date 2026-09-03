@@ -238,6 +238,11 @@ mod access_rules_template {
 
         /// Custom resource auth hook
         pub fn valid_auth_hook(&self, action: ResourceAuthAction, caller: AuthHookCaller) {
+            assert_eq!(
+                *caller.resource(),
+                self.tokens.resource_address(),
+                "hook invoked for a resource this component does not manage"
+            );
             let state = caller.component_state();
             debug!("Component state {:?}", state);
             if !self.allowed {
@@ -245,9 +250,19 @@ mod access_rules_template {
             }
         }
 
-        /// Auth hook gated purely by the hook component's access rules on the acting caller. Used to
-        /// verify that the hook observes the acting component (not the hook author) as its caller.
-        pub fn caller_gated_hook(&self, _action: ResourceAuthAction, _caller: AuthHookCaller) {}
+        /// Auth hook whose method rule gates on the acting caller. Used to verify that the hook observes the
+        /// acting component (not the hook author) as its caller.
+        ///
+        /// The caller gate alone is never sufficient: any resource may bind this method as its hook, so a
+        /// gated caller acting on a hostile resource still passes the method rule. The hook must check the
+        /// resource itself.
+        pub fn caller_gated_hook(&self, _action: ResourceAuthAction, caller: AuthHookCaller) {
+            assert_eq!(
+                *caller.resource(),
+                self.tokens.resource_address(),
+                "hook invoked for a resource this component does not manage"
+            );
+        }
 
         pub fn malicious_auth_hook_set_state(&self, action: ResourceAuthAction, caller: AuthHookCaller) {
             debug!("malicious_auth_hook_set_state: action = {:?}", action);
