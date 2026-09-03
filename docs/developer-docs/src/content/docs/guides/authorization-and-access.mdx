@@ -71,7 +71,8 @@ restricted rule wraps one or more **requirements**:
 - `rule!(component(address))` — execution is within the given component (the current frame is that component).
 - `rule!(template(address))` — execution is within the given template (the current frame is that template).
 - `rule!(caller_component(address))` — the caller of a component method is the given component.
-- `rule!(caller_template(address))` — the caller of a component method belongs to the given template.
+- `rule!(direct_caller_template(address))` — the immediate caller of a component method is code from the given
+  template: any component instance of it, or any static function of it.
 - `rule!(any_of(...))`, `rule!(all_of(...))`, `rule!(m_of_n(n, ...))` — combine requirements.
 
 #### Caller vs. current component
@@ -83,20 +84,26 @@ There are two related but distinct ways a rule can reference a component or temp
   the caller. Use them when a method should only run while that component/template is executing, or when
   the same rule is evaluated for resource/ownership checks where the current frame is the actor.
 
-- `caller_component(address)` / `caller_template(address)` ask _"is the caller this component/template?"_.
-  These are meaningful on **component method** access rules: the caller is the component/template whose
-  frame was current immediately before the callee's frame was pushed. `caller_template(address)` matches a
-  component instance of that template **or** a static (template-function) call from that template, because
-  a static function has a template identity but no component instance.
+- `caller_component(address)` / `direct_caller_template(address)` ask _"who called this method?"_. These are
+  meaningful on **component method** access rules. The caller is always the **direct** caller: the frame
+  that was current immediately before the callee's frame was pushed. If A calls B and B calls C, C's rule
+  sees B, never A.
+
+  `direct_caller_template(address)` is a **package** identity, not an instance identity. It matches any
+  component instance of that template, including instances anyone may create through a public
+  constructor, and any static function of that template, which anyone may call from a transaction. It is
+  therefore only as strong as the least careful outgoing call anywhere in that template: a method or
+  static function that forwards a caller-chosen component and method lets anyone act as the template.
 
 A method invoked directly by a top-level transaction instruction has no caller component/template frame —
-the caller is a signer — so `caller_component` / `caller_template` rules **deny** it. Use a badge, public
+the caller is a signer — so `caller_component` / `direct_caller_template` rules **deny** it. Use a badge, public
 key, or other proof requirement to allow signer-driven calls.
 
-**Caution:** `caller_component` / `caller_template` match the immediate caller's identity, which is only as
+**Caution:** `caller_component` / `direct_caller_template` match the immediate caller's identity, which is only as
 trustworthy as the code that makes the call. A method that forwards a caller-supplied component/template and
 method (a "proxy" method) delegates that identity, so anyone who can call the proxy can act as the proxied
-caller.
+caller. `caller_component(address)` also trusts the **owner** of that component, not its current code: the
+owner can migrate the component to any template unless it was created with `OwnerRule::None`.
 
 The same applies to resource auth hooks: the engine invokes the hook with the acting component as the
 caller, and any resource may bind any hook-shaped method. A caller gate on a hook method is therefore never
@@ -224,7 +231,7 @@ Callers are identified by various types, depending on the context:
 The `auth` module in `tari_template_lib` provides utilities for working with identities and proofs within your templates.
 
 These identities appear in `rule!` requirements: `component(...)` / `template(...)` refer to the current
-execution scope, while `caller_component(...)` / `caller_template(...)` refer to the method's caller (see
+execution scope, while `caller_component(...)` / `direct_caller_template(...)` refer to the method's caller (see
 [Caller vs. current component](#caller-vs-current-component)).
 
 ### Best Practices

@@ -559,7 +559,7 @@ where
         // The migration frame runs with the *target* template as its `current_template`, while the
         // component being migrated is the caller's. Only the target template's own migration function
         // executes in this frame, so the template identity is honest — but `template(...)` (and
-        // `caller_template(...)`) would become forgeable if any other code ever ran here.
+        // `direct_caller_template(...)`) would become forgeable if any other code ever ran here.
         runtime.interface_mut().push_call_frame(call_frame)?;
         // This must come after the call frame as that defines the authorization scope
         runtime

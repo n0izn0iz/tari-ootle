@@ -313,13 +313,13 @@ fn check_requirement<TStore: StateReader>(
             let current = state.current_template()?;
             Ok(current == address)
         },
-        // `CallerComponent` / `CallerTemplate` mean "the caller is this component/template": they are only
+        // `CallerComponent` / `DirectCallerTemplate` mean "the caller is this component/template": they are only
         // meaningful on method checks, and a top-level signer has no component/template identity to match.
         RuleRequirement::CallerComponent(address) => match context {
             RuleContext::Caller(Some(caller)) => Ok(caller.component == Some(*address)),
             RuleContext::Caller(None) | RuleContext::CurrentFrame => Ok(false),
         },
-        RuleRequirement::CallerTemplate(address) => match context {
+        RuleRequirement::DirectCallerTemplate(address) => match context {
             RuleContext::Caller(Some(caller)) => Ok(caller.template == *address),
             RuleContext::Caller(None) | RuleContext::CurrentFrame => Ok(false),
         },

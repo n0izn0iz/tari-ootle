@@ -1480,7 +1480,7 @@ mod resource_access_rules {
 
         assert_reject_reason(reason, RuntimeError::InvalidArgument {
             argument: "new_rule",
-            reason: "caller_component/caller_template cannot be used on a resource access rule".to_string(),
+            reason: "caller_component/direct_caller_template cannot be used on a resource access rule".to_string(),
         });
     }
 

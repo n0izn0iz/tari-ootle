@@ -13,4 +13,4 @@ export type RuleRequirement =
   | { ScopedToComponent: ComponentAddress }
   | { ScopedToTemplate: Hash32 }
   | { CallerComponent: ComponentAddress }
-  | { CallerTemplate: Hash32 };
+  | { DirectCallerTemplate: Hash32 };

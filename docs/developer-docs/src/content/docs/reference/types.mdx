@@ -87,7 +87,7 @@ Defines permission levels for component methods or resource operations.
 -   **Purpose:** Granular control over who can interact with your smart contracts.
 
 `RestrictedAccessRule` is normally built with the `rule!` macro rather than by hand. Its requirements include
-`resource`, `non_fungible`, `public_key`, `component`, `template`, `caller_component` and `caller_template`,
+`resource`, `non_fungible`, `public_key`, `component`, `template`, `caller_component` and `direct_caller_template`,
 which can be combined with `any_of`, `all_of` and `m_of_n`. See the
 <a href={basePath("/guides/authorization-and-access/")}>Authorization and Access</a> guide for the semantics.
 

@@ -1859,7 +1859,8 @@ where
                 if new_rule.contains_caller_component_or_template() {
                     return Err(RuntimeError::InvalidArgument {
                         argument: "new_rule",
-                        reason: "caller_component/caller_template cannot be used on a resource access rule".to_string(),
+                        reason: "caller_component/direct_caller_template cannot be used on a resource access rule"
+                            .to_string(),
                     });
                 }
 

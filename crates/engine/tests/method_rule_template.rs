@@ -7,10 +7,10 @@ use tari_template_test_tooling::{TemplateTest, support::assert_error::assert_rej
 
 const CRATE_PATH: &str = env!("CARGO_MANIFEST_DIR");
 
-/// A `rule!(caller_template(addr))` method access rule allows callers from the template whose address is
+/// A `rule!(direct_caller_template(addr))` method access rule allows callers from the template whose address is
 /// `addr`, whether they are a component instance of that template or a static function of it.
 #[test]
-fn caller_template_rule_allows_a_component_caller() {
+fn direct_caller_template_rule_allows_a_component_caller() {
     let mut test = TemplateTest::new(CRATE_PATH, [
         "tests/templates/caller_template_caller",
         "tests/templates/caller_template_callee",
@@ -20,7 +20,7 @@ fn caller_template_rule_allows_a_component_caller() {
 
     // Create the caller component, then the callee gated on the caller's *template* address. `call_ping`
     // is the control (an unrestricted cross-component call); `call_bar` is allowed because the caller is
-    // a component of `caller_template`.
+    // a component of the caller template.
     test.execute_expect_success(
         test.transaction()
             .call_function(caller_template, "new", args![])
@@ -36,7 +36,7 @@ fn caller_template_rule_allows_a_component_caller() {
 
 /// A static function of the gated template is allowed (its template matches the gate).
 #[test]
-fn caller_template_rule_allows_a_static_function_caller() {
+fn direct_caller_template_rule_allows_a_static_function_caller() {
     let mut test = TemplateTest::new(CRATE_PATH, [
         "tests/templates/caller_template_caller",
         "tests/templates/caller_template_callee",
@@ -45,7 +45,7 @@ fn caller_template_rule_allows_a_static_function_caller() {
     let callee_template = test.get_template_address("TemplateCallee");
 
     // Gate the callee's `bar` on the caller's *template* address. `call_ping_static` is the control; a
-    // static function of `caller_template` is allowed to call `bar`.
+    // static function of the caller template is allowed to call `bar`.
     test.execute_expect_success(
         test.transaction()
             .call_function(callee_template, "new", args![caller_template])
@@ -59,7 +59,7 @@ fn caller_template_rule_allows_a_static_function_caller() {
 
 /// A caller from a different template must be denied.
 #[test]
-fn caller_template_rule_denies_a_component_of_another_template() {
+fn direct_caller_template_rule_denies_a_component_of_another_template() {
     let mut test = TemplateTest::new(CRATE_PATH, [
         "tests/templates/caller_component_caller",
         "tests/templates/caller_template_caller",

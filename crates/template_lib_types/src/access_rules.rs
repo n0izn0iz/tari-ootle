@@ -65,13 +65,13 @@ impl AccessRule {
         })
     }
 
-    /// Returns `true` if the rule contains `CallerComponent` or `CallerTemplate`, which always evaluate
+    /// Returns `true` if the rule contains `CallerComponent` or `DirectCallerTemplate`, which always evaluate
     /// to `false` in a current-frame context (resource rules and covenants).
     pub fn contains_caller_component_or_template(&self) -> bool {
         self.contains_requirement(&|r| {
             matches!(
                 r,
-                RuleRequirement::CallerComponent(_) | RuleRequirement::CallerTemplate(_)
+                RuleRequirement::CallerComponent(_) | RuleRequirement::DirectCallerTemplate(_)
             )
         })
     }
@@ -234,10 +234,10 @@ pub enum RuleRequirement {
     /// Requires a call from a specific component: the caller of a component method is that component
     #[n(4)]
     CallerComponent(#[n(0)] ComponentAddress),
-    /// Requires a call from a specific template: the caller of a component method belongs to that
-    /// template (whether a component instance or a static function)
+    /// Requires that the immediate caller of a component method is code from a specific template: any component
+    /// instance of it, or any static function of it
     #[n(5)]
-    CallerTemplate(#[n(0)] TemplateAddress),
+    DirectCallerTemplate(#[n(0)] TemplateAddress),
 }
 
 impl From<ResourceAddress> for RuleRequirement {
@@ -340,7 +340,7 @@ impl ComponentAccessRules {
         assert!(
             !rule.contains_scoped_to_component_or_template(),
             "`component(..)`/`template(..)` are constant on component method rules; use \
-             `caller_component(..)`/`caller_template(..)` to gate on the caller"
+             `caller_component(..)`/`direct_caller_template(..)` to gate on the caller"
         );
         self.method_access.insert(name.into(), rule);
         self
@@ -361,7 +361,7 @@ impl ComponentAccessRules {
         assert!(
             !rule.contains_scoped_to_component_or_template(),
             "`component(..)`/`template(..)` are constant on component method rules; use \
-             `caller_component(..)`/`caller_template(..)` to gate on the caller"
+             `caller_component(..)`/`direct_caller_template(..)` to gate on the caller"
         );
         self.default = rule;
         self
@@ -489,7 +489,7 @@ impl ResourceAccessRules {
     fn assert_no_caller_requirement(rule: &AccessRule) {
         assert!(
             !rule.contains_caller_component_or_template(),
-            "`caller_component(..)`/`caller_template(..)` always evaluate to false on resource rules; use \
+            "`caller_component(..)`/`direct_caller_template(..)` always evaluate to false on resource rules; use \
              `component(..)`/`template(..)` or a proof requirement instead"
         );
     }
@@ -668,22 +668,22 @@ impl Default for ResourceAccessRules {
 /// `n_of` constructs.
 ///
 /// `component(addr)` / `template(addr)` require execution within a component/template, while
-/// `caller_component(addr)` / `caller_template(addr)` require a call from that component/template and are intended for
-/// component method access rules.
+/// `caller_component(addr)` / `direct_caller_template(addr)` require a call from that component/template and are
+/// intended for component method access rules. "Direct" means the immediate caller only: if A calls B and B calls C,
+/// C's rule sees B.
 ///
-/// **Caution:** `caller_component` / `caller_template` match the immediate caller's identity, which is only as
+/// **Caution:** `caller_component` / `direct_caller_template` match the immediate caller's identity, which is only as
 /// trustworthy as the code that makes the call. A method that forwards a caller-supplied component and method (a
 /// "proxy" method) delegates that identity, so anyone who can call the proxy can act as the proxied component/template.
+/// `direct_caller_template` is a package identity: it matches any instance of the template (including ones anyone can
+/// create) and any static function of it (which anyone can call), so it is only as strong as the least careful outgoing
+/// call anywhere in that template.
 ///
-/// `component(addr)` / `template(addr)` are constant on component **method** rules (they always describe the current
-/// frame, i.e. the callee), and `caller_component(addr)` / `caller_template(addr)` always evaluate to `false` on
-/// **resource** rules; both are rejected at construction by the builder methods. The builder checks are a
-/// template-author lint; the engine additionally rejects `caller_component`/`caller_template` on the dynamic resource
-/// `ResourceAction::UpdateAccessRule` path and `component`/`template` on the dynamic component
-/// `ComponentAction::SetAccessRules` path, but does not re-validate resource creation or component creation, so a
-/// hand-written or non-Rust template could still install a constant rule through those paths. `OwnerRule::ByAccessRule`
-/// is evaluated in both contexts, so those requirements are *not* rejected there — check the [`RuleRequirement`] docs
-/// before using them in an owner rule.
+/// `component(addr)` / `template(addr)` are constant on component **method** rules and owner rules (they always
+/// describe the current frame, i.e. the component itself), and `caller_component(addr)` /
+/// `direct_caller_template(addr)` always evaluate to `false` on **resource** rules. The builder methods reject both at
+/// construction, and the engine rejects them on component creation, `ComponentAction::SetAccessRules` and
+/// `ResourceAction::UpdateAccessRule`.
 ///
 /// # Examples:
 ///
@@ -709,7 +709,7 @@ impl Default for ResourceAccessRules {
 /// // Restricted access to calls from a specific component (component method rules)
 /// let caller_component_rule = rule!(caller_component(component_address));
 /// // Restricted access to calls from a specific template (component method rules)
-/// let caller_template_rule = rule!(caller_template(template_address));
+/// let caller_template_rule = rule!(direct_caller_template(template_address));
 /// // Restricted access to a non-fungible token
 /// let non_fungible_address = tari_template_lib_types::NonFungibleAddress::from_public_key(
 ///     tari_template_lib_types::crypto::RistrettoPublicKeyBytes::default(),
@@ -786,8 +786,8 @@ macro_rules! __rule_requirement {
     (caller_component($x: expr)) => {
         $crate::access_rules::RuleRequirement::CallerComponent($x)
     };
-    (caller_template($x: expr)) => {
-        $crate::access_rules::RuleRequirement::CallerTemplate($x)
+    (direct_caller_template($x: expr)) => {
+        $crate::access_rules::RuleRequirement::DirectCallerTemplate($x)
     };
 }
 
@@ -1009,9 +1009,9 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "always evaluate to false on resource rules")]
-    fn resource_rule_rejects_caller_template() {
+    fn resource_rule_rejects_direct_caller_template() {
         let address = TemplateAddress::default();
-        ResourceAccessRules::new().withdrawable(rule!(caller_template(address)), LOCKED);
+        ResourceAccessRules::new().withdrawable(rule!(direct_caller_template(address)), LOCKED);
     }
 
     #[test]

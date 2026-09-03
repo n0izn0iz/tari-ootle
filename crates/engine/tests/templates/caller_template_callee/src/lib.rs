@@ -13,7 +13,7 @@ mod callee {
     impl TemplateCallee {
         pub fn new(gate: TemplateAddress) -> Component<Self> {
             let access_rules = ComponentAccessRules::new()
-                .method("bar", rule!(caller_template(gate)))
+                .method("bar", rule!(direct_caller_template(gate)))
                 .method("ping", rule!(allow_all))
                 .default(rule!(deny_all));
 
